@@ -65,6 +65,7 @@ app.post('/process', async (req: Request, res: Response) => {
         ideas: [],
         relevance_score: 0,
         priority_signal: false,
+        priority_reason: null,
         tags: [],
         category: 'other',
       };

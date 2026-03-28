@@ -8,7 +8,8 @@ async function sendTelegramAlert(source: string, analysis: ContentAnalysis): Pro
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) return;
 
-  const text = `🚨 Приоритетный контент из ${source}:\n${analysis.summary}\nИдеи: ${analysis.ideas.join(', ')}`;
+  const reason = analysis.priority_reason ? `\nПричина: ${analysis.priority_reason}` : '';
+  const text = `🚨 Приоритетный контент из ${source}:\n${analysis.summary}\nИдеи: ${analysis.ideas.join(', ')}${reason}`;
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
 
   try {
@@ -31,6 +32,7 @@ export async function analyzeContent(text: string, source: string): Promise<Cont
   "ideas": ["идея 1", "идея 2"],
   "relevance_score": 0.8,
   "priority_signal": false,
+  "priority_reason": "почему это важно или null если priority_signal=false",
   "tags": ["tag1", "tag2"],
   "category": "feature"
 }

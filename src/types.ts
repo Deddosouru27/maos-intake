@@ -43,6 +43,7 @@ export interface ContentAnalysis {
   ideas: string[];
   relevance_score: number; // 0.0 – 1.0
   priority_signal: boolean;
+  priority_reason: string | null;
   tags: string[];
   category: IdeaCategory;
 }
