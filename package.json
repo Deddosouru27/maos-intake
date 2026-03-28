@@ -12,7 +12,7 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
-  "engines": { "node": "18.x" },
+  "engines": { "node": "24.x" },
   "devDependencies": {
     "@types/node": "^25.5.0",
     "tsx": "^4.21.0",
