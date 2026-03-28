@@ -143,6 +143,56 @@ app.post('/batch', async (req: Request, res: Response) => {
   res.json({ results, errors });
 });
 
+app.get('/stats', async (_req: Request, res: Response) => {
+  const { createClient } = await import('@supabase/supabase-js');
+
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  const memoryUrl = process.env.MEMORY_SUPABASE_URL;
+  const memoryKey = process.env.MEMORY_SUPABASE_ANON_KEY;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  let processed_today = 0;
+  let total_processed = 0;
+  let memory_entries = 0;
+
+  try {
+    if (pitstopUrl && pitstopKey) {
+      const pitstop = createClient(pitstopUrl, pitstopKey);
+      const [{ count: todayCount }, { count: totalCount }] = await Promise.all([
+        pitstop.from('ideas').select('*', { count: 'exact', head: true })
+          .not('source_type', 'is', null)
+          .gte('created_at', today.toISOString()),
+        pitstop.from('ideas').select('*', { count: 'exact', head: true })
+          .not('source_type', 'is', null),
+      ]);
+      processed_today = todayCount ?? 0;
+      total_processed = totalCount ?? 0;
+    }
+  } catch (err) {
+    console.error('[/stats] pitstop query failed:', err);
+  }
+
+  try {
+    if (memoryUrl && memoryKey) {
+      const memory = createClient(memoryUrl, memoryKey);
+      const { count } = await memory.from('memories').select('*', { count: 'exact', head: true });
+      memory_entries = count ?? 0;
+    }
+  } catch (err) {
+    console.error('[/stats] memory query failed:', err);
+  }
+
+  res.json({
+    processed_today,
+    total_processed,
+    memory_entries,
+    uptime_seconds: Math.floor(process.uptime()),
+  });
+});
+
 interface SummarizeBody {
   text: string;
   maxLength?: number;
