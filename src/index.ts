@@ -78,10 +78,12 @@ app.post('/process', async (req: Request, res: Response) => {
 
     console.log('Analysis result:', JSON.stringify(analysis, null, 2));
 
-    await saveToMemory(analysis, url, url, source);
-    await saveToPitstop(analysis, source);
-
+    // Respond immediately, fire-and-forget background writes
     res.json(analysis);
+    Promise.allSettled([
+      saveToMemory(analysis, url, url, source),
+      saveToPitstop(analysis, source),
+    ]).catch(console.error);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[/process] error for ${url}:`, message);
