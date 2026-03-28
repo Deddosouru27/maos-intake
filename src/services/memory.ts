@@ -14,9 +14,8 @@ export async function saveToMemory(
   url?: string,
   sourceType?: string,
 ): Promise<void> {
-  const threshold = Number(process.env.RELEVANCE_THRESHOLD) || 0.2;
-  if (analysis.relevance_score < threshold) {
-    console.log(`[memory] skipping low relevance: ${analysis.relevance_score} < ${threshold}`);
+  if (analysis.relevance_score < 0.3) {
+    console.log('[memory] skipping low relevance:', analysis.relevance_score);
     return;
   }
   if (analysis.ideas.length === 0) {

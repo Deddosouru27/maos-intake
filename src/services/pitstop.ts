@@ -19,9 +19,8 @@ export async function saveToPitstop(
   sourceType: string,
   sourceUrl?: string,
 ): Promise<void> {
-  const threshold = Number(process.env.RELEVANCE_THRESHOLD) || 0.2;
-  if (analysis.relevance_score < threshold) {
-    console.log(`[pitstop] skipping low relevance: ${analysis.relevance_score} < ${threshold}`);
+  if (analysis.relevance_score < 0.3) {
+    console.log('[pitstop] skipping low relevance:', analysis.relevance_score);
     return;
   }
   if (analysis.ideas.length === 0) {
