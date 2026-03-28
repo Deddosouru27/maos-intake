@@ -58,6 +58,18 @@ app.get('/health', (_req: Request, res: Response) => {
   });
 });
 
+async function processWithRetry(url: string, source: Source, retries = 3): Promise<ContentAnalysis> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await processUrl(url, source);
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+  throw new Error('unreachable');
+}
+
 async function processUrl(url: string, source: Source): Promise<ContentAnalysis> {
   if (source === 'youtube') {
     const { audioPath } = await downloadAudio(url);
@@ -99,7 +111,7 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
   const source = detectSource(url, providedSource);
 
   try {
-    const analysis = await processUrl(url, source);
+    const analysis = await processWithRetry(url, source);
     console.log('Analysis result:', JSON.stringify(analysis, null, 2));
 
     res.json(analysis);
@@ -137,7 +149,7 @@ app.post('/batch', processLimiter, async (req: Request, res: Response) => {
   for (const url of urls) {
     const source = detectSource(url);
     try {
-      const analysis = await processUrl(url, source);
+      const analysis = await processWithRetry(url, source);
       results.push(analysis);
       Promise.allSettled([
         saveToMemory(analysis, url, url, source),
