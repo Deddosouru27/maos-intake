@@ -1,7 +1,48 @@
-import { IntakeResult } from '../types';
+import { createClient } from '@supabase/supabase-js';
+import { ContentAnalysis } from '../types';
 
-// Stub — will write to maos-memory Supabase project
-export async function saveToMemory(result: IntakeResult): Promise<void> {
-  console.log(`[memory] stub: would save to maos-memory — source=${result.source_type}`);
-  // TODO: connect to maos-memory Supabase (separate project from pitstop)
+function getClient() {
+  const url = process.env.MEMORY_SUPABASE_URL;
+  const key = process.env.MEMORY_SUPABASE_ANON_KEY;
+  if (!url || !key) throw new Error('MEMORY_SUPABASE_URL or MEMORY_SUPABASE_ANON_KEY not set');
+  return createClient(url, key);
+}
+
+export async function saveToMemory(
+  analysis: ContentAnalysis,
+  source: string,
+  url?: string,
+  sourceType?: string,
+): Promise<void> {
+  let supabase;
+  try {
+    supabase = getClient();
+  } catch (err) {
+    console.error('[memory] client init failed:', err);
+    return;
+  }
+
+  const { error } = await supabase.from('memories').insert({
+    content: analysis.summary,
+    metadata: {
+      source,
+      url,
+      ideas: analysis.ideas,
+      tags: analysis.tags,
+      relevance_score: analysis.relevance_score,
+    },
+    source: 'maos-intake',
+    profile: 'artur',
+    tags: ['intake', sourceType ?? 'unknown', ...analysis.tags],
+    importance: analysis.relevance_score,
+    confidence: 1.0,
+    compression_level: 0,
+    surprise: 0.0,
+  });
+
+  if (error) {
+    console.error('[memory] INSERT failed:', error.message);
+  } else {
+    console.log(`[memory] saved to maos-memory: ${source}`);
+  }
 }

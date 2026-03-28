@@ -40,6 +40,6 @@ export interface ContentAnalysis {
   summary: string;
   ideas: string[];
   relevance_score: number; // 0.0 – 1.0
-  priority_signal: 'high' | 'medium' | 'low';
+  priority_signal: boolean;
   tags: string[];
 }
