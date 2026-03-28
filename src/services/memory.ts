@@ -14,6 +14,16 @@ export async function saveToMemory(
   url?: string,
   sourceType?: string,
 ): Promise<void> {
+  const threshold = Number(process.env.RELEVANCE_THRESHOLD) || 0.2;
+  if (analysis.relevance_score < threshold) {
+    console.log(`[memory] skipping low relevance: ${analysis.relevance_score} < ${threshold}`);
+    return;
+  }
+  if (analysis.ideas.length === 0) {
+    console.log('[memory] skipping: no ideas extracted');
+    return;
+  }
+
   let supabase;
   try {
     supabase = getClient();

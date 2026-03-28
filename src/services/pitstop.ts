@@ -19,6 +19,16 @@ export async function saveToPitstop(
   sourceType: string,
   sourceUrl?: string,
 ): Promise<void> {
+  const threshold = Number(process.env.RELEVANCE_THRESHOLD) || 0.2;
+  if (analysis.relevance_score < threshold) {
+    console.log(`[pitstop] skipping low relevance: ${analysis.relevance_score} < ${threshold}`);
+    return;
+  }
+  if (analysis.ideas.length === 0) {
+    console.log('[pitstop] skipping: no ideas extracted');
+    return;
+  }
+
   let supabase;
   try {
     supabase = getClient();
