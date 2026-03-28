@@ -33,6 +33,9 @@ export async function downloadAudio(url: string): Promise<YouTubeDownloadResult>
     meta = raw as unknown as YouTubeMetadata;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('ENOENT') || msg.includes('spawn') || msg.includes('not found')) {
+      throw new Error('yt-dlp не установлен. Установи: pip install yt-dlp');
+    }
     if (msg.includes('not available') || msg.includes('Private video')) {
       throw new Error(`Video unavailable: ${url}`);
     }
@@ -52,14 +55,16 @@ export async function downloadAudio(url: string): Promise<YouTubeDownloadResult>
 
   try {
     await youtubeDl(url, {
-      extractAudio: true,
-      audioFormat: 'best',
+      format: 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
       output: outputPath,
       noCheckCertificates: true,
       noWarnings: true,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('ENOENT') || msg.includes('spawn') || msg.includes('not found')) {
+      throw new Error('yt-dlp не установлен. Установи: pip install yt-dlp');
+    }
     throw new Error(`Audio download failed: ${msg}`);
   }
 
