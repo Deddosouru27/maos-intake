@@ -88,6 +88,47 @@ app.post('/process', async (req: Request, res: Response) => {
   }
 });
 
+interface SummarizeBody {
+  text: string;
+  maxLength?: number;
+}
+
+app.post('/summarize', async (req: Request, res: Response) => {
+  const { text, maxLength } = req.body as SummarizeBody;
+
+  if (!text) {
+    res.status(400).json({ error: 'text is required' });
+    return;
+  }
+
+  const truncated = text.length > 10000 ? text.slice(0, 10000) : text;
+  const words = maxLength ?? 200;
+
+  const Anthropic = (await import('@anthropic-ai/sdk')).default;
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  try {
+    const message = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      messages: [{
+        role: 'user',
+        content: `Суммаризируй текст в ${words} слов. Верни JSON: { "summary": string, "keyPoints": string[] } — только JSON без markdown\n\n${truncated}`,
+      }],
+    });
+
+    const raw = message.content[0].type === 'text' ? message.content[0].text : '';
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw) as { summary: string; keyPoints: string[] };
+
+    res.json(parsed);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[/summarize] error:', message);
+    res.status(500).json({ error: message });
+  }
+});
+
 // Local dev only — Vercel handles listening in serverless
 if (process.env.VERCEL !== '1') {
   app.listen(PORT, () => {
