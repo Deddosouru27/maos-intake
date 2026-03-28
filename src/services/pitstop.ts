@@ -8,12 +8,17 @@ function getClient() {
   return createClient(url, key);
 }
 
+function toRelevance(score: number): 'hot' | 'interesting' | 'noise' {
+  if (score > 0.7) return 'hot';
+  if (score > 0.3) return 'interesting';
+  return 'noise';
+}
+
 export async function saveToPitstop(
   analysis: ContentAnalysis,
   sourceType: string,
+  sourceUrl?: string,
 ): Promise<void> {
-  if (analysis.ideas.length === 0) return;
-
   let supabase;
   try {
     supabase = getClient();
@@ -22,18 +27,23 @@ export async function saveToPitstop(
     return;
   }
 
-  const rows = analysis.ideas.map((idea) => ({
-    content: idea,
-    category: analysis.category,
+  const row = {
+    content: analysis.summary,
+    extracted_ideas: analysis.ideas,
     source_type: sourceType,
+    source_url: sourceUrl ?? null,
+    ai_category: analysis.category,
+    relevance: toRelevance(analysis.relevance_score),
+    ai_analysis: analysis,
+    status: 'new',
     project_id: null,
-  }));
+  };
 
-  const { error } = await supabase.from('ideas').insert(rows);
+  const { error } = await supabase.from('ideas').insert(row);
 
   if (error) {
     console.error('[pitstop] INSERT failed:', error.message);
   } else {
-    console.log(`[pitstop] saved ${rows.length} ideas from ${sourceType}`);
+    console.log(`[pitstop] saved analysis from ${sourceType} (relevance: ${row.relevance})`);
   }
 }

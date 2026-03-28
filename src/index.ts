@@ -77,7 +77,7 @@ async function processUrl(url: string, source: Source): Promise<ContentAnalysis>
       ideas: [],
       relevance_score: 0,
       priority_signal: false,
-      priority_reason: null,
+      priority_reason: '',
       tags: [],
       category: 'other',
       language: 'other',
@@ -105,7 +105,7 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
     res.json(analysis);
     Promise.allSettled([
       saveToMemory(analysis, url, url, source),
-      saveToPitstop(analysis, source),
+      saveToPitstop(analysis, source, url),
     ]).catch(console.error);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -141,7 +141,7 @@ app.post('/batch', processLimiter, async (req: Request, res: Response) => {
       results.push(analysis);
       Promise.allSettled([
         saveToMemory(analysis, url, url, source),
-        saveToPitstop(analysis, source),
+        saveToPitstop(analysis, source, url),
       ]).catch(console.error);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

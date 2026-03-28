@@ -36,15 +36,19 @@ export interface TranscriptionResult {
   duration: number;        // seconds
 }
 
-export type IdeaCategory = 'feature' | 'marketing' | 'ux' | 'bug' | 'infra' | 'business' | 'other';
+export interface IdeaItem {
+  text: string;
+  project: string;
+  actionable: boolean;
+}
 
 export interface ContentAnalysis {
   summary: string;
-  ideas: string[];
+  ideas: IdeaItem[];
   relevance_score: number; // 0.0 – 1.0
   priority_signal: boolean;
-  priority_reason: string | null;
-  tags: string[];
-  category: IdeaCategory;
+  priority_reason: string;
+  category: string;        // 'ai' | 'dev' | 'infrastructure' | 'product' | 'business' | 'other'
   language: string;        // 'ru' | 'en' | 'other'
+  tags: string[];
 }
