@@ -1,111 +1,84 @@
 import 'dotenv/config';
-import { createClient } from '@supabase/supabase-js';
-import { config } from './config';
-import { handleArticle } from './handlers/article';
-import { handleYoutube } from './handlers/youtube';
-import { handleText } from './handlers/text';
-import { analyze } from './analyzer';
-import { saveIdea } from './supabase';
-import { IntakeResult } from './types';
+import express, { Request, Response } from 'express';
+import { downloadAudio } from './handlers/youtube';
+import { transcribeAudio } from './services/transcribe';
+import { analyzeContent } from './services/analyze';
+import { saveToMemory } from './services/memory';
+import { fetchArticle } from './handlers/article';
+import { ContentAnalysis } from './types';
 
-const supabase = createClient(config.supabaseUrl, config.supabaseKey);
+const app = express();
+app.use(express.json());
 
-const POLL_INTERVAL_MS = 10_000;
+const PORT = parseInt(process.env.PORT ?? '3001', 10);
 
-async function processJob(job: { id: string; url: string; source_type?: string }): Promise<void> {
-  const input = job.url;
-  let content: string;
-  let sourceType: string;
-  let sourceUrl: string | undefined;
+type Source = 'youtube' | 'instagram' | 'article' | 'url' | 'thread';
 
-  const isUrl = input.startsWith('http://') || input.startsWith('https://');
+interface ProcessBody {
+  url: string;
+  source?: Source;
+}
 
-  if (isUrl) {
-    sourceUrl = input;
-    const isYoutube = input.includes('youtube.com') || input.includes('youtu.be');
-    if (isYoutube) {
-      content = await handleYoutube(input);
-      sourceType = 'youtube';
+function detectSource(url: string, provided?: Source): Source {
+  if (provided && provided !== 'url') return provided;
+  if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
+  if (url.includes('twitter.com') || url.includes('x.com') || url.includes('threads.net')) return 'thread';
+  if (url.includes('instagram.com')) return 'instagram';
+  return 'article';
+}
+
+app.get('/health', (_req: Request, res: Response) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+app.post('/process', async (req: Request, res: Response) => {
+  const { url, source: providedSource } = req.body as ProcessBody;
+
+  if (!url) {
+    res.status(400).json({ error: 'url is required' });
+    return;
+  }
+
+  const source = detectSource(url, providedSource);
+
+  let analysis: ContentAnalysis;
+
+  try {
+    if (source === 'youtube') {
+      const { audioPath } = await downloadAudio(url);
+      const transcription = await transcribeAudio(audioPath);
+      analysis = await analyzeContent(transcription.text, url);
+
+    } else if (source === 'thread') {
+      const { fetchThread } = await import('./handlers/threads');
+      const thread = await fetchThread(url);
+      analysis = await analyzeContent(thread.text || url, url);
+
+    } else if (source === 'instagram') {
+      analysis = {
+        summary: 'Instagram не поддерживается',
+        ideas: [],
+        relevance_score: 0,
+        priority_signal: false,
+        tags: [],
+      };
+
     } else {
-      content = await handleArticle(input);
-      sourceType = 'article';
+      // article or url
+      const { text } = await fetchArticle(url);
+      analysis = await analyzeContent(text, url);
     }
-  } else {
-    content = await handleText(input);
-    sourceType = job.source_type ?? 'text';
+
+    await saveToMemory(analysis, url, url, source);
+
+    res.json(analysis);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[/process] error for ${url}:`, message);
+    res.status(500).json({ error: message });
   }
+});
 
-  const analysis = await analyze(content);
-
-  const result: IntakeResult = {
-    content,
-    summary: analysis.summary,
-    extracted_ideas: analysis.extracted_ideas,
-    relevance: analysis.relevance,
-    source_type: sourceType,
-    source_url: sourceUrl,
-  };
-
-  await saveIdea(result, config.projectId);
-}
-
-async function poll(): Promise<void> {
-  console.log('Polling for pending ideas...');
-
-  const { data: jobs, error } = await supabase
-    .from('ideas')
-    .select('id, source_url, source_type')
-    .eq('status', 'pending')
-    .limit(5);
-
-  if (error) {
-    console.error('Poll error:', error.message);
-    return;
-  }
-
-  if (!jobs || jobs.length === 0) {
-    return;
-  }
-
-  console.log(`Found ${jobs.length} pending jobs.`);
-
-  for (const job of jobs) {
-    const url = job.source_url as string;
-    if (!url) continue;
-
-    console.log(`Processing job ${job.id as string}: ${url}`);
-
-    // Mark as processing
-    await supabase.from('ideas').update({ status: 'processing' }).eq('id', job.id);
-
-    try {
-      await processJob({ id: job.id as string, url, source_type: job.source_type as string });
-      await supabase.from('ideas').update({ status: 'done' }).eq('id', job.id);
-      console.log(`Job ${job.id as string} done.`);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      await supabase
-        .from('ideas')
-        .update({ status: 'failed', ai_analysis: { error: message } })
-        .eq('id', job.id);
-      console.error(`Job ${job.id as string} failed: ${message}`);
-    }
-  }
-}
-
-async function main(): Promise<void> {
-  console.log('maos-intake polling service started.');
-  console.log(`Supabase: ${config.supabaseUrl}`);
-  console.log(`Project: ${config.projectId}`);
-  console.log(`Poll interval: ${POLL_INTERVAL_MS / 1000}s`);
-
-  await poll();
-  setInterval(() => {
-    poll().catch((err) => console.error('Unexpected poll error:', err));
-  }, POLL_INTERVAL_MS);
-}
-
-main().catch((err) => {
-  console.error('Fatal error:', err);
-  process.exit(1);
+app.listen(PORT, () => {
+  console.log(`maos-intake listening on port ${PORT}`);
 });
