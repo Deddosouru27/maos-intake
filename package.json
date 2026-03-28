@@ -12,7 +12,9 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
-  "engines": { "node": "24.x" },
+  "engines": {
+    "node": "24.x"
+  },
   "devDependencies": {
     "@types/node": "^25.5.0",
     "tsx": "^4.21.0",
@@ -20,6 +22,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
+    "@distube/ytdl-core": "^4.16.12",
     "@supabase/supabase-js": "^2.100.1",
     "@types/express": "^5.0.6",
     "@types/html-to-text": "^9.0.4",
@@ -27,7 +30,6 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "groq-sdk": "^1.1.2",
-    "html-to-text": "^9.0.5",
-    "youtube-dl-exec": "^3.1.4"
+    "html-to-text": "^9.0.5"
   }
 }
