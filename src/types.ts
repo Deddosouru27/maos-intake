@@ -36,10 +36,13 @@ export interface TranscriptionResult {
   duration: number;        // seconds
 }
 
+export type IdeaCategory = 'feature' | 'marketing' | 'ux' | 'bug' | 'infra' | 'business' | 'other';
+
 export interface ContentAnalysis {
   summary: string;
   ideas: string[];
   relevance_score: number; // 0.0 – 1.0
   priority_signal: boolean;
   tags: string[];
+  category: IdeaCategory;
 }

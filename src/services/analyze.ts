@@ -31,8 +31,10 @@ export async function analyzeContent(text: string, source: string): Promise<Cont
   "ideas": ["идея 1", "идея 2"],
   "relevance_score": 0.8,
   "priority_signal": false,
-  "tags": ["tag1", "tag2"]
+  "tags": ["tag1", "tag2"],
+  "category": "feature"
 }
+Категория (одна из): "feature" | "marketing" | "ux" | "bug" | "infra" | "business" | "other"
 Контент (источник: ${source}):
 ${truncated}`;
 

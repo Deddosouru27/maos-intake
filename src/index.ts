@@ -62,6 +62,7 @@ app.post('/process', async (req: Request, res: Response) => {
         relevance_score: 0,
         priority_signal: false,
         tags: [],
+        category: 'other',
       };
 
     } else {
