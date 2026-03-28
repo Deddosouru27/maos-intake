@@ -37,6 +37,7 @@ export async function saveToPitstop(
   }
 
   const row = {
+    summary: analysis.summary.slice(0, 80),
     content: analysis.summary,
     extracted_ideas: analysis.ideas,
     source_type: sourceType,
