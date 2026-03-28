@@ -1,5 +1,5 @@
 export interface IntakeSource {
-  type: 'youtube' | 'article' | 'text';
+  type: 'youtube' | 'article' | 'text' | 'instagram';
   url?: string;
   raw_text?: string;
 }
@@ -19,4 +19,27 @@ export interface IntakeJob {
   status: 'pending' | 'processing' | 'done' | 'failed';
   result?: IntakeResult;
   error?: string;
+}
+
+export interface YouTubeMetadata {
+  title: string;
+  duration: number;        // seconds
+  uploader?: string;
+  upload_date?: string;    // YYYYMMDD
+  description?: string;
+  webpage_url?: string;
+}
+
+export interface TranscriptionResult {
+  text: string;
+  language: string;
+  duration: number;        // seconds
+}
+
+export interface ContentAnalysis {
+  summary: string;
+  ideas: string[];
+  relevance_score: number; // 0.0 – 1.0
+  priority_signal: 'high' | 'medium' | 'low';
+  tags: string[];
 }
