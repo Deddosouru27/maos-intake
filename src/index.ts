@@ -4,6 +4,7 @@ import { downloadAudio } from './handlers/youtube';
 import { transcribeAudio } from './services/transcribe';
 import { analyzeContent } from './services/analyze';
 import { saveToMemory } from './services/memory';
+import { saveToPitstop } from './services/pitstop';
 import { fetchArticle } from './handlers/article';
 import { ContentAnalysis } from './types';
 
@@ -70,6 +71,7 @@ app.post('/process', async (req: Request, res: Response) => {
     }
 
     await saveToMemory(analysis, url, url, source);
+    await saveToPitstop(analysis, source);
 
     res.json(analysis);
   } catch (err) {
