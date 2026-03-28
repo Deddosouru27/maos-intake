@@ -1,13 +1,15 @@
 import 'dotenv/config';
+import { createHash } from 'crypto';
 import express, { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { downloadAudio } from './handlers/youtube';
 import { transcribeAudio } from './services/transcribe';
 import { analyzeContent } from './services/analyze';
 import { saveToMemory } from './services/memory';
-import { saveToPitstop } from './services/pitstop';
+import { saveIngestedContent, saveExtractedKnowledge, saveToPitstop } from './services/pitstop';
 import { fetchArticle } from './handlers/article';
-import { ContentAnalysis } from './types';
+import { getFullContext } from './services/projectContext';
+import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, RoutedTo } from './types';
 
 const app = express();
 app.use(express.json());
@@ -36,19 +38,44 @@ interface ProcessBody {
 function detectSource(url: string, provided?: Source): Source {
   if (provided && provided !== 'url') return provided;
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
-  if (url.includes('twitter.com') || url.includes('x.com') || url.includes('threads.net')) return 'thread';
+  if (url.includes('twitter.com') || url.includes('x.com') || url.includes('threads.net'))
+    return 'thread';
   if (url.includes('instagram.com')) return 'instagram';
   return 'article';
 }
 
-app.get('/health', (_req: Request, res: Response) => {
-  const key = (name: string) =>
-    process.env[name] ? 'connected' : 'missing_key';
+function computeHash(text: string): string {
+  return createHash('sha256').update(text.slice(0, 1000)).digest('hex');
+}
 
+function routeItems(items: KnowledgeItem[]): RoutedKnowledgeItem[] {
+  return items.map((item) => {
+    let routed_to: RoutedTo;
+    if (item.immediate_relevance >= 0.7 || item.has_ready_code) {
+      routed_to = 'hot_backlog';
+    } else if (item.strategic_relevance >= 0.5) {
+      routed_to = 'knowledge_base';
+    } else {
+      routed_to = 'discarded';
+    }
+    return { ...item, routed_to };
+  });
+}
+
+function buildNotification(routed: RoutedKnowledgeItem[]): string {
+  const hot = routed.filter((i) => i.routed_to === 'hot_backlog').length;
+  const strategic = routed.filter((i) => i.routed_to === 'knowledge_base').length;
+  if (hot > 0) return `🔥 ${hot} идей для текущих задач`;
+  if (strategic > 0) return `📚 ${strategic} знаний сохранено в базу`;
+  return '📭 Нерелевантен для наших направлений';
+}
+
+app.get('/health', (_req: Request, res: Response) => {
+  const key = (name: string) => (process.env[name] ? 'connected' : 'missing_key');
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '1.0.0',
+    version: '2.0.0',
     services: {
       anthropic: key('ANTHROPIC_API_KEY'),
       groq: key('GROQ_API_KEY'),
@@ -58,46 +85,70 @@ app.get('/health', (_req: Request, res: Response) => {
   });
 });
 
-async function processWithRetry(url: string, source: Source, retries = 3): Promise<ContentAnalysis> {
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await processUrl(url, source);
-    } catch (err) {
-      if (i === retries - 1) throw err;
-      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
-    }
-  }
-  throw new Error('unreachable');
-}
-
-async function processUrl(url: string, source: Source): Promise<ContentAnalysis> {
+// Phase 1: fetch raw content (no analysis — allows dedup check before API call)
+async function fetchRawContent(
+  url: string,
+  source: Source,
+): Promise<{ rawText: string; title?: string }> {
   if (source === 'youtube') {
     const { audioPath } = await downloadAudio(url);
     const transcription = await transcribeAudio(audioPath);
-    return analyzeContent(transcription.text, url);
+    return { rawText: transcription.text };
   }
 
   if (source === 'thread') {
     const { fetchThread } = await import('./handlers/threads');
     const thread = await fetchThread(url);
-    return analyzeContent(thread.text || url, url);
+    return { rawText: thread.text || url };
   }
 
   if (source === 'instagram') {
-    return {
-      summary: 'Instagram не поддерживается',
-      ideas: [],
-      relevance_score: 0,
-      priority_signal: false,
-      priority_reason: '',
-      tags: [],
-      category: 'other',
-      language: 'other',
-    };
+    return { rawText: '' };
   }
 
-  const { text } = await fetchArticle(url);
-  return analyzeContent(text, url);
+  const { text, title } = await fetchArticle(url);
+  return { rawText: text, title };
+}
+
+// Phase 2: analyze with retry — errors only on final attempt
+async function analyzeWithRetry(
+  rawText: string,
+  url: string,
+  retries = 3,
+): Promise<BrainAnalysis> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await analyzeContent(rawText, url);
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+  throw new Error('unreachable');
+}
+
+// Phase 3: route + persist (fire-and-forget)
+async function runPipeline(
+  rawText: string,
+  analysis: BrainAnalysis,
+  sourceUrl: string,
+  sourceType: string,
+  contentHash: string,
+  title?: string,
+): Promise<string> {
+  const routed = routeItems(analysis.knowledge_items);
+  const hotItems = routed.filter((i) => i.routed_to === 'hot_backlog');
+  const strategicItems = routed.filter((i) => i.routed_to === 'knowledge_base');
+  const notification = buildNotification(routed);
+
+  await Promise.allSettled([
+    saveIngestedContent(rawText, sourceUrl, sourceType, title, contentHash),
+    saveExtractedKnowledge(routed, sourceUrl, sourceType),
+    saveToPitstop(analysis, hotItems, sourceType, sourceUrl),
+    saveToMemory(analysis, strategicItems, sourceUrl, sourceUrl, sourceType),
+  ]);
+
+  return notification;
 }
 
 app.post('/process', processLimiter, async (req: Request, res: Response) => {
@@ -111,14 +162,45 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
   const source = detectSource(url, providedSource);
 
   try {
-    const analysis = await processWithRetry(url, source);
+    // Instagram stub — no fetch needed
+    if (source === 'instagram') {
+      res.json({
+        summary: 'Instagram не поддерживается',
+        knowledge_items: [],
+        overall_immediate: 0,
+        overall_strategic: 0,
+        priority_signal: false,
+        priority_reason: '',
+        category: 'other',
+        language: 'other',
+        notification: '📭 Instagram не поддерживается',
+      });
+      return;
+    }
+
+    // Phase 1: fetch
+    const { rawText, title } = await fetchRawContent(url, source);
+    const contentHash = computeHash(rawText);
+
+    // Dedup check — skip analysis if content already processed
+    const context = await getFullContext();
+    if (context.recentHashes.includes(contentHash)) {
+      console.log('[process] duplicate content, skipping analysis');
+      res.json({ duplicate: true, notification: '♻️ Этот контент уже обрабатывался' });
+      return;
+    }
+
+    // Phase 2: analyze
+    const analysis = await analyzeWithRetry(rawText, url);
     console.log('Analysis result:', JSON.stringify(analysis, null, 2));
 
+    // Respond immediately
     res.json(analysis);
-    Promise.allSettled([
-      saveToMemory(analysis, url, url, source),
-      saveToPitstop(analysis, source, url),
-    ]).catch(console.error);
+
+    // Phase 3: persist in background
+    runPipeline(rawText, analysis, url, source, contentHash, title)
+      .then((notification) => console.log(`[process] ${notification}`))
+      .catch(console.error);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[/process] error for ${url}:`, message);
@@ -143,18 +225,49 @@ app.post('/batch', processLimiter, async (req: Request, res: Response) => {
     return;
   }
 
-  const results: ContentAnalysis[] = [];
+  const results: (BrainAnalysis & { notification?: string; duplicate?: boolean })[] = [];
   const errors: { url: string; error: string }[] = [];
 
   for (const url of urls) {
     const source = detectSource(url);
     try {
-      const analysis = await processWithRetry(url, source);
+      if (source === 'instagram') {
+        results.push({
+          summary: 'Instagram не поддерживается',
+          knowledge_items: [],
+          overall_immediate: 0,
+          overall_strategic: 0,
+          priority_signal: false,
+          priority_reason: '',
+          category: 'other',
+          language: 'other',
+        });
+        continue;
+      }
+
+      const { rawText, title } = await fetchRawContent(url, source);
+      const contentHash = computeHash(rawText);
+
+      const context = await getFullContext();
+      if (context.recentHashes.includes(contentHash)) {
+        results.push({
+          summary: '',
+          knowledge_items: [],
+          overall_immediate: 0,
+          overall_strategic: 0,
+          priority_signal: false,
+          priority_reason: '',
+          category: 'other',
+          language: 'other',
+          duplicate: true,
+          notification: '♻️ Этот контент уже обрабатывался',
+        });
+        continue;
+      }
+
+      const analysis = await analyzeWithRetry(rawText, url);
       results.push(analysis);
-      Promise.allSettled([
-        saveToMemory(analysis, url, url, source),
-        saveToPitstop(analysis, source, url),
-      ]).catch(console.error);
+      runPipeline(rawText, analysis, url, source, contentHash, title).catch(console.error);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[/batch] error for ${url}:`, message);
@@ -178,20 +291,24 @@ app.get('/stats', async (_req: Request, res: Response) => {
 
   let processed_today = 0;
   let total_processed = 0;
+  let knowledge_items = 0;
   let memory_entries = 0;
 
   try {
     if (pitstopUrl && pitstopKey) {
       const pitstop = createClient(pitstopUrl, pitstopKey);
-      const [{ count: todayCount }, { count: totalCount }] = await Promise.all([
-        pitstop.from('ideas').select('*', { count: 'exact', head: true })
-          .not('source_type', 'is', null)
-          .gte('created_at', today.toISOString()),
-        pitstop.from('ideas').select('*', { count: 'exact', head: true })
-          .not('source_type', 'is', null),
-      ]);
+      const [{ count: todayCount }, { count: totalCount }, { count: knowledgeCount }] =
+        await Promise.all([
+          pitstop
+            .from('ingested_content')
+            .select('*', { count: 'exact', head: true })
+            .gte('created_at', today.toISOString()),
+          pitstop.from('ingested_content').select('*', { count: 'exact', head: true }),
+          pitstop.from('extracted_knowledge').select('*', { count: 'exact', head: true }),
+        ]);
       processed_today = todayCount ?? 0;
       total_processed = totalCount ?? 0;
+      knowledge_items = knowledgeCount ?? 0;
     }
   } catch (err) {
     console.error('[/stats] pitstop query failed:', err);
@@ -210,6 +327,7 @@ app.get('/stats', async (_req: Request, res: Response) => {
   res.json({
     processed_today,
     total_processed,
+    knowledge_items,
     memory_entries,
     uptime_seconds: Math.floor(process.uptime()),
   });
@@ -238,15 +356,20 @@ app.post('/summarize', async (req: Request, res: Response) => {
     const message = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1024,
-      messages: [{
-        role: 'user',
-        content: `Суммаризируй текст в ${words} слов. Верни JSON: { "summary": string, "keyPoints": string[] } — только JSON без markdown\n\n${truncated}`,
-      }],
+      messages: [
+        {
+          role: 'user',
+          content: `Суммаризируй текст в ${words} слов. Верни JSON: { "summary": string, "keyPoints": string[] } — только JSON без markdown\n\n${truncated}`,
+        },
+      ],
     });
 
     const raw = message.content[0].type === 'text' ? message.content[0].text : '';
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw) as { summary: string; keyPoints: string[] };
+    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw) as {
+      summary: string;
+      keyPoints: string[];
+    };
 
     res.json(parsed);
   } catch (err) {

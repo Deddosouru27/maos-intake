@@ -1,17 +1,20 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { ContentAnalysis } from '../types';
-import { getProjectContext, buildProjectContextPrompt } from './projectContext';
+import { BrainAnalysis } from '../types';
+import { getFullContext, buildSystemPrompt } from './projectContext';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-async function sendTelegramAlert(source: string, analysis: ContentAnalysis): Promise<void> {
+async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) return;
 
-  const ideas = analysis.ideas.map((i) => `• [${i.project}] ${i.text}`).join('\n');
+  const hotItems = analysis.knowledge_items
+    .filter((i) => i.immediate_relevance >= 0.7 || i.has_ready_code)
+    .map((i) => `• [${i.project ?? 'general'}] ${i.content}`)
+    .join('\n');
   const reason = analysis.priority_reason ? `\nПричина: ${analysis.priority_reason}` : '';
-  const text = `🚨 Приоритетный контент из ${source}:\n${analysis.summary}\n\nИдеи:\n${ideas}${reason}`;
+  const text = `🚨 Приоритетный контент из ${source}:\n${analysis.summary}\n\nГорячие знания:\n${hotItems}${reason}`;
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
 
   try {
@@ -25,105 +28,54 @@ async function sendTelegramAlert(source: string, analysis: ContentAnalysis): Pro
   }
 }
 
-export async function analyzeContent(text: string, source: string): Promise<ContentAnalysis> {
+export async function analyzeContent(text: string, source: string): Promise<BrainAnalysis> {
   const truncated = text.length > 8000 ? text.slice(0, 8000) + '...' : text;
 
-  const projects = await getProjectContext();
-  const projectsSection = buildProjectContextPrompt(projects);
+  const context = await getFullContext();
+  const systemPrompt = buildSystemPrompt(context);
 
-  const systemPrompt = `Ты — аналитик контента для системы MAOS. Твоя единственная задача — находить практически применимые идеи для конкретных проектов команды.
-
-## Проекты команды (загружены из базы данных)
-
-${projectsSection}
-
-## Как анализировать
-
-ШАГ 1 — ПОНИМАНИЕ: Прочитай контент. Определи основную тему.
-
-ШАГ 2 — ФИЛЬТРАЦИЯ: Для каждого проекта из списка выше спроси себя: "Есть ли в этом контенте что-то конкретно применимое к этому проекту?" Не натягивай — если связь слабая или абстрактная, не включай.
-
-ШАГ 3 — ИЗВЛЕЧЕНИЕ: Запиши только идеи с конкретным действием. "Добавить streak-механику в Life RPG по аналогии с Duolingo" — хорошо. "Геймификация полезна для мотивации" — плохо (слишком абстрактно).
-
-ШАГ 4 — ОЦЕНКА: relevance_score — это доля контента которая реально полезна для наших проектов. Статья полностью про кулинарию = 0.0-0.1. Статья про AI агентов = 0.7-0.9. Статья про AI агентов с конкретными архитектурными решениями которые мы можем применить = 0.9-1.0.
-
-## НЕРЕЛЕВАНТНО — всегда relevance_score = 0.0, ideas = []
-
-Следующие темы АВТОМАТИЧЕСКИ нерелевантны, даже если кажется что можно что-то применить:
-- Образовательные платформы, методики обучения, EdTech
-- Партнёрства компаний не связанных с AI или разработкой ПО
-- Геймификация в образовании (не в продуктах для конечных пользователей)
-- B2G, государственные контракты, тендеры, госзакупки
-- Новости игровых компаний (выпуск игр, обновления, партнёрства) если нет технической составляющей
-- Корпоративные новости без технической или продуктовой ценности
-- Политика, спорт, кулинария, лайфстайл, личные истории
-- Маркетинг и реклама без применимых инструментов или метрик
-
-## РЕЛЕВАНТНО — контент про эти темы может иметь высокий score
-
-- AI агенты, LLM, промпт-инжиниринг, orchestration
-- Разработка ПО: архитектура, паттерны, инструменты, DevOps
-- Геймификация жизни, habit tracking, системы мотивации (для Life RPG)
-- Продуктивность, системы задач, личная эффективность
-- Supabase, Vercel, Anthropic, Vite, React, Node.js — новости и обновления
-- Монетизация SaaS, подписки, growth hacking для software продуктов
-- Open-source инструменты заменяющие то что мы строим сами
-
-## Строгие правила
-
-1. ВСЕ ответы и идеи ТОЛЬКО на русском языке, даже если контент на английском.
-
-2. Каждая идея ОБЯЗАНА содержать: конкретное действие + к какому проекту относится. "Интересная мысль про AI" — ЗАПРЕЩЕНО. "Добавить в Runner retry с exponential backoff как описано в статье" — ПРАВИЛЬНО.
-
-3. НЕ ВЫДУМЫВАЙ идеи которых нет в контенте. Если в видео нет прямых идей для наших проектов — ideas: [], relevance_score: 0.0.
-
-4. priority_signal: true ТОЛЬКО если контент содержит:
-   — Критический баг или уязвимость в технологиях которые мы используем (Supabase, Vercel, Anthropic, Vite, React)
-   — Новый инструмент или API который ПРЯМО решает текущую проблему из наших проектов
-   — Существенное удешевление или улучшение используемых нами сервисов
-   — Готовое open-source решение которое заменяет то что мы сейчас пишем сами
-
-5. Максимум 5 идей. Лучше 2 сильных чем 5 слабых.
-
-6. Tags — на русском, конкретные, не общие. "автоматизация тестов" — хорошо. "технологии" — плохо.`;
-
-  const userPrompt = `Проанализируй контент и верни ТОЛЬКО валидный JSON без markdown-обёртки, без \`\`\`json, без пояснений — только JSON:
+  const userPrompt = `Проанализируй и верни ТОЛЬКО JSON без markdown:
 
 {
-  "summary": "2-3 предложения на русском — о чём контент и почему он релевантен/нерелевантен нашим проектам",
-  "ideas": [
+  "summary": "2-3 предложения на русском",
+  "knowledge_items": [
     {
-      "text": "конкретное действие на русском",
-      "project": "название проекта из списка выше",
-      "actionable": true
+      "content": "Конкретное описание знания",
+      "knowledge_type": "actionable_idea | tool_or_library | architecture_pattern | code_snippet | insight | technique | case_study | strategic_idea | lesson_learned",
+      "project": "название проекта или null",
+      "domains": ["название domain из списка"],
+      "solves_need": "какую current_need решает или null",
+      "immediate_relevance": 0.0,
+      "strategic_relevance": 0.0,
+      "novelty": 0.0,
+      "effort": "trivial | low | medium | high | huge",
+      "has_ready_code": false,
+      "tags": ["теги"]
     }
   ],
-  "relevance_score": 0.0,
+  "overall_immediate": 0.0,
+  "overall_strategic": 0.0,
   "priority_signal": false,
   "priority_reason": "",
-  "category": "ai",
-  "language": "ru",
-  "tags": ["тег1", "тег2"]
+  "category": "ai | dev | infrastructure | product | business | content | other",
+  "language": "ru | en | other"
 }
 
-Если контент нерелевантен — ideas: [], relevance_score: 0.0-0.1.
-
-Контент для анализа:
-${truncated}`;
+Контент: ${truncated}`;
 
   const message = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 1024,
+    max_tokens: 2048,
     system: systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
   });
 
   const raw = message.content[0].type === 'text' ? message.content[0].text : '';
 
-  let parsed: ContentAnalysis;
+  let parsed: BrainAnalysis;
   try {
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw) as ContentAnalysis;
+    parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw) as BrainAnalysis;
   } catch {
     throw new Error(`Failed to parse Haiku response: ${raw}`);
   }

@@ -1,31 +1,8 @@
-export interface IntakeSource {
-  type: 'youtube' | 'article' | 'text' | 'instagram';
-  url?: string;
-  raw_text?: string;
-}
-
-export interface IntakeResult {
-  content: string;
-  summary: string;
-  extracted_ideas: string[];
-  relevance: 'hot' | 'interesting' | 'noise';
-  source_type: string;
-  source_url?: string;
-}
-
-export interface IntakeJob {
-  id: string;
-  url: string;
-  status: 'pending' | 'processing' | 'done' | 'failed';
-  result?: IntakeResult;
-  error?: string;
-}
-
 export interface YouTubeMetadata {
   title: string;
-  duration: number;        // seconds
+  duration: number;
   uploader?: string;
-  upload_date?: string;    // YYYYMMDD
+  upload_date?: string;
   description?: string;
   webpage_url?: string;
 }
@@ -33,22 +10,48 @@ export interface YouTubeMetadata {
 export interface TranscriptionResult {
   text: string;
   language: string;
-  duration: number;        // seconds
+  duration: number;
 }
 
-export interface IdeaItem {
-  text: string;
-  project: string;
-  actionable: boolean;
+export type KnowledgeType =
+  | 'actionable_idea'
+  | 'tool_or_library'
+  | 'architecture_pattern'
+  | 'code_snippet'
+  | 'insight'
+  | 'technique'
+  | 'case_study'
+  | 'strategic_idea'
+  | 'lesson_learned';
+
+export type EffortLevel = 'trivial' | 'low' | 'medium' | 'high' | 'huge';
+export type RoutedTo = 'hot_backlog' | 'knowledge_base' | 'discarded';
+
+export interface KnowledgeItem {
+  content: string;
+  knowledge_type: KnowledgeType;
+  project: string | null;
+  domains: string[];
+  solves_need: string | null;
+  immediate_relevance: number;
+  strategic_relevance: number;
+  novelty: number;
+  effort: EffortLevel;
+  has_ready_code: boolean;
+  tags: string[];
 }
 
-export interface ContentAnalysis {
+export interface RoutedKnowledgeItem extends KnowledgeItem {
+  routed_to: RoutedTo;
+}
+
+export interface BrainAnalysis {
   summary: string;
-  ideas: IdeaItem[];
-  relevance_score: number; // 0.0 – 1.0
+  knowledge_items: KnowledgeItem[];
+  overall_immediate: number;
+  overall_strategic: number;
   priority_signal: boolean;
   priority_reason: string;
-  category: string;        // 'ai' | 'dev' | 'infrastructure' | 'product' | 'business' | 'other'
-  language: string;        // 'ru' | 'en' | 'other'
-  tags: string[];
+  category: string;
+  language: string;
 }
