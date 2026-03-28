@@ -82,6 +82,11 @@ app.post('/process', async (req: Request, res: Response) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`maos-intake listening on port ${PORT}`);
-});
+// Local dev only — Vercel handles listening in serverless
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`maos-intake listening on port ${PORT}`);
+  });
+}
+
+export default app;
