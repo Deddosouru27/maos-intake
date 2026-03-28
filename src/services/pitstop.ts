@@ -25,7 +25,7 @@ export async function saveToPitstop(
   const rows = analysis.ideas.map((idea) => ({
     content: idea,
     category: analysis.category,
-    source: sourceType,
+    source_type: sourceType,
     project_id: null,
   }));
 
