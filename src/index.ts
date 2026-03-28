@@ -10,6 +10,10 @@ import { ContentAnalysis } from './types';
 
 const app = express();
 app.use(express.json());
+app.use((req: Request, _res: Response, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
 
 const PORT = parseInt(process.env.PORT ?? '3001', 10);
 
@@ -70,6 +74,8 @@ app.post('/process', async (req: Request, res: Response) => {
       const { text } = await fetchArticle(url);
       analysis = await analyzeContent(text, url);
     }
+
+    console.log('Analysis result:', JSON.stringify(analysis, null, 2));
 
     await saveToMemory(analysis, url, url, source);
     await saveToPitstop(analysis, source);
