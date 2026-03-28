@@ -33,8 +33,50 @@ function detectSource(url: string, provided?: Source): Source {
 }
 
 app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  const key = (name: string) =>
+    process.env[name] ? 'connected' : 'missing_key';
+
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    version: '1.0.0',
+    services: {
+      anthropic: key('ANTHROPIC_API_KEY'),
+      groq: key('GROQ_API_KEY'),
+      pitstop_supabase: key('PITSTOP_SUPABASE_ANON_KEY'),
+      memory_supabase: key('MEMORY_SUPABASE_ANON_KEY'),
+    },
+  });
 });
+
+async function processUrl(url: string, source: Source): Promise<ContentAnalysis> {
+  if (source === 'youtube') {
+    const { audioPath } = await downloadAudio(url);
+    const transcription = await transcribeAudio(audioPath);
+    return analyzeContent(transcription.text, url);
+  }
+
+  if (source === 'thread') {
+    const { fetchThread } = await import('./handlers/threads');
+    const thread = await fetchThread(url);
+    return analyzeContent(thread.text || url, url);
+  }
+
+  if (source === 'instagram') {
+    return {
+      summary: 'Instagram не поддерживается',
+      ideas: [],
+      relevance_score: 0,
+      priority_signal: false,
+      priority_reason: null,
+      tags: [],
+      category: 'other',
+    };
+  }
+
+  const { text } = await fetchArticle(url);
+  return analyzeContent(text, url);
+}
 
 app.post('/process', async (req: Request, res: Response) => {
   const { url, source: providedSource } = req.body as ProcessBody;
@@ -46,39 +88,10 @@ app.post('/process', async (req: Request, res: Response) => {
 
   const source = detectSource(url, providedSource);
 
-  let analysis: ContentAnalysis;
-
   try {
-    if (source === 'youtube') {
-      const { audioPath } = await downloadAudio(url);
-      const transcription = await transcribeAudio(audioPath);
-      analysis = await analyzeContent(transcription.text, url);
-
-    } else if (source === 'thread') {
-      const { fetchThread } = await import('./handlers/threads');
-      const thread = await fetchThread(url);
-      analysis = await analyzeContent(thread.text || url, url);
-
-    } else if (source === 'instagram') {
-      analysis = {
-        summary: 'Instagram не поддерживается',
-        ideas: [],
-        relevance_score: 0,
-        priority_signal: false,
-        priority_reason: null,
-        tags: [],
-        category: 'other',
-      };
-
-    } else {
-      // article or url
-      const { text } = await fetchArticle(url);
-      analysis = await analyzeContent(text, url);
-    }
-
+    const analysis = await processUrl(url, source);
     console.log('Analysis result:', JSON.stringify(analysis, null, 2));
 
-    // Respond immediately, fire-and-forget background writes
     res.json(analysis);
     Promise.allSettled([
       saveToMemory(analysis, url, url, source),
@@ -89,6 +102,45 @@ app.post('/process', async (req: Request, res: Response) => {
     console.error(`[/process] error for ${url}:`, message);
     res.status(500).json({ error: message });
   }
+});
+
+interface BatchBody {
+  urls: string[];
+}
+
+app.post('/batch', async (req: Request, res: Response) => {
+  const { urls } = req.body as BatchBody;
+
+  if (!Array.isArray(urls) || urls.length === 0) {
+    res.status(400).json({ error: 'urls must be a non-empty array' });
+    return;
+  }
+
+  if (urls.length > 10) {
+    res.status(400).json({ error: 'Maximum 10 URLs per batch' });
+    return;
+  }
+
+  const results: ContentAnalysis[] = [];
+  const errors: { url: string; error: string }[] = [];
+
+  for (const url of urls) {
+    const source = detectSource(url);
+    try {
+      const analysis = await processUrl(url, source);
+      results.push(analysis);
+      Promise.allSettled([
+        saveToMemory(analysis, url, url, source),
+        saveToPitstop(analysis, source),
+      ]).catch(console.error);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[/batch] error for ${url}:`, message);
+      errors.push({ url, error: message });
+    }
+  }
+
+  res.json({ results, errors });
 });
 
 interface SummarizeBody {
