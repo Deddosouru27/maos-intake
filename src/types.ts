@@ -46,4 +46,5 @@ export interface ContentAnalysis {
   priority_reason: string | null;
   tags: string[];
   category: IdeaCategory;
+  language: string;        // 'ru' | 'en' | 'other'
 }

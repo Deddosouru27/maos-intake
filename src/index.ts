@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express, { Request, Response } from 'express';
+import rateLimit from 'express-rate-limit';
 import { downloadAudio } from './handlers/youtube';
 import { transcribeAudio } from './services/transcribe';
 import { analyzeContent } from './services/analyze';
@@ -16,6 +17,14 @@ app.use((req: Request, _res: Response, next) => {
 });
 
 const PORT = parseInt(process.env.PORT ?? '3001', 10);
+
+const processLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { error: 'Слишком много запросов. Подожди минуту.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 type Source = 'youtube' | 'instagram' | 'article' | 'url' | 'thread';
 
@@ -71,6 +80,7 @@ async function processUrl(url: string, source: Source): Promise<ContentAnalysis>
       priority_reason: null,
       tags: [],
       category: 'other',
+      language: 'other',
     };
   }
 
@@ -78,7 +88,7 @@ async function processUrl(url: string, source: Source): Promise<ContentAnalysis>
   return analyzeContent(text, url);
 }
 
-app.post('/process', async (req: Request, res: Response) => {
+app.post('/process', processLimiter, async (req: Request, res: Response) => {
   const { url, source: providedSource } = req.body as ProcessBody;
 
   if (!url) {
@@ -108,7 +118,7 @@ interface BatchBody {
   urls: string[];
 }
 
-app.post('/batch', async (req: Request, res: Response) => {
+app.post('/batch', processLimiter, async (req: Request, res: Response) => {
   const { urls } = req.body as BatchBody;
 
   if (!Array.isArray(urls) || urls.length === 0) {

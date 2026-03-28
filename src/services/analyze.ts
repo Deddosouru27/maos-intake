@@ -34,9 +34,11 @@ export async function analyzeContent(text: string, source: string): Promise<Cont
   "priority_signal": false,
   "priority_reason": "почему это важно или null если priority_signal=false",
   "tags": ["tag1", "tag2"],
-  "category": "feature"
+  "category": "feature",
+  "language": "ru"
 }
 Категория (одна из): "feature" | "marketing" | "ux" | "bug" | "infra" | "business" | "other"
+Язык (одно из): "ru" | "en" | "other"
 Контент (источник: ${source}):
 ${truncated}`;
 

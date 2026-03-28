@@ -30,6 +30,7 @@ export async function saveToMemory(
       ideas: analysis.ideas,
       tags: analysis.tags,
       relevance_score: analysis.relevance_score,
+      language: analysis.language,
     },
     source: 'maos-intake',
     profile: 'artur',
