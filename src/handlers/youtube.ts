@@ -1,4 +1,4 @@
-import { getVideoDetails } from 'youtube-caption-extractor';
+import { YoutubeTranscript } from 'youtube-transcript-plus';
 
 function extractVideoId(url: string): string | null {
   const patterns = [
@@ -17,22 +17,46 @@ export async function fetchYouTubeText(url: string): Promise<{ title: string; te
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error(`Cannot extract video ID from URL: ${url}`);
 
-  // Try Russian first, then English
-  let details = await getVideoDetails({ videoID: videoId, lang: 'ru' });
-  if (!details.subtitles || details.subtitles.length === 0) {
-    details = await getVideoDetails({ videoID: videoId, lang: 'en' });
+  let segments: { text: string }[];
+  let title = 'YouTube video';
+
+  try {
+    // Try with videoDetails to get title
+    const result = await YoutubeTranscript.fetchTranscript(videoId, {
+      lang: 'ru',
+      videoDetails: true,
+    });
+
+    if (Array.isArray(result)) {
+      segments = result;
+    } else {
+      segments = result.segments;
+      title = result.videoDetails?.title || title;
+    }
+  } catch {
+    // Fallback to English
+    try {
+      const result = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'en' });
+      segments = Array.isArray(result) ? result : (result as { segments: { text: string }[] }).segments;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // If blocked on Vercel — return a helpful error
+      throw new Error(
+        `YouTube временно недоступен (${msg}). Попробуйте через youtubetotranscript.com и отправьте текст как /idea`,
+      );
+    }
   }
 
-  if (!details.subtitles || details.subtitles.length === 0) {
-    throw new Error('No captions available for this video');
+  if (!segments || segments.length === 0) {
+    throw new Error(
+      'No captions available for this video. Попробуйте через youtubetotranscript.com и отправьте текст как /idea',
+    );
   }
 
-  const text = details.subtitles.map((s: { text: string }) => s.text).join(' ');
-  return {
-    title: details.title || 'YouTube video',
-    text,
-  };
+  const text = segments.map((s) => s.text).join(' ');
+  return { title, text };
 }
 
-// Legacy download+transcribe kept for future use (Railway deployment with Whisper)
-// export async function downloadAudio(url: string): Promise<YouTubeDownloadResult> { ... }
+// Legacy download+Whisper kept for future Railway deployment (no IP blocking)
+// import ytdl from '@distube/ytdl-core';
+// export async function downloadAudio(url: string): Promise<{ audioPath, title, duration }> { ... }
