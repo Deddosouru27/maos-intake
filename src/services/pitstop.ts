@@ -105,6 +105,7 @@ export async function updateIngestedDone(
       knowledge_count: analysis.knowledge_items.length,
       routing_result: routingResult,
       language: analysis.language,
+      haiku_raw_response: analysis,
     })
     .eq('id', id);
 
