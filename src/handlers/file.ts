@@ -1,6 +1,4 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const pdfParse = require('pdf-parse');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const mammoth = require('mammoth');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const XLSX = require('xlsx');
@@ -19,8 +17,9 @@ export async function extractFileText(
   sourceType: FileSourceType,
 ): Promise<string> {
   if (sourceType === 'pdf') {
-    const data = await pdfParse(buffer) as { text: string };
-    return data.text;
+    // pdf-parse uses native bindings incompatible with Vercel serverless
+    // pdfjs-dist support coming soon
+    throw new Error('PDF parsing not yet supported. Please convert to text or Word first.');
   }
 
   if (sourceType === 'docx') {
