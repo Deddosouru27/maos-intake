@@ -66,7 +66,7 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
 
   const message = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 2048,
+    max_tokens: 1024,
     system: systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
   });

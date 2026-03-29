@@ -8,15 +8,13 @@ function getClient() {
   return createClient(url, key);
 }
 
-// Returns inserted row id (used as FK for extracted_knowledge)
-export async function saveIngestedContent(
+// INSERT before analysis — ensures dedup works even if Haiku fails
+export async function insertIngestedPending(
   rawText: string,
   sourceUrl: string,
   sourceType: string,
   title: string | undefined,
   contentHash: string,
-  analysis: BrainAnalysis,
-  routingResult: string,
 ): Promise<string | null> {
   let supabase;
   try {
@@ -28,38 +26,29 @@ export async function saveIngestedContent(
 
   const insertData = {
     source_url: sourceUrl,
-    source_type: sourceType || 'unknown',   // NOT NULL — never let this be empty
+    source_type: sourceType || 'unknown',
     raw_text: rawText.slice(0, 50000),
     title: title ?? null,
     content_hash: contentHash,
-    summary: analysis.summary,
-    overall_immediate: analysis.overall_immediate,
-    overall_strategic: analysis.overall_strategic,
-    knowledge_count: analysis.knowledge_items.length,
-    routing_result: routingResult,
-    language: analysis.language,
     word_count: rawText.split(/\s+/).filter(Boolean).length,
-    processing_status: 'done',
+    processing_status: 'processing',
   };
 
-  console.log('[INTAKE] ingested_content data:', JSON.stringify(insertData));
+  console.log('[INTAKE] inserting ingested_content (pending):', { sourceUrl, contentHash: contentHash.slice(0, 8) });
 
   let insertError;
   try {
     ({ error: insertError } = await supabase.from('ingested_content').insert(insertData));
   } catch (err) {
-    console.error('[INTAKE] IC ERROR (exception):', err instanceof Error ? err.message : String(err));
+    console.error('[INTAKE] IC INSERT exception:', err instanceof Error ? err.message : String(err));
     return null;
   }
 
   if (insertError) {
-    console.error('[INTAKE] IC ERROR:', JSON.stringify(insertError));
+    console.error('[INTAKE] IC INSERT ERROR:', JSON.stringify(insertError));
     return null;
   }
 
-  console.log('[INTAKE] ingested_content INSERT OK, fetching id...');
-
-  // Fetch id separately after insert
   const { data: row, error: selectError } = await supabase
     .from('ingested_content')
     .select('id')
@@ -69,13 +58,47 @@ export async function saveIngestedContent(
     .single();
 
   if (selectError) {
-    console.warn('[INTAKE] ingested_content SELECT id failed (row was saved):', selectError.message);
+    console.warn('[INTAKE] IC SELECT id failed:', selectError.message);
     return null;
   }
 
   const id = (row as { id: string } | null)?.id ?? null;
-  console.log('[INTAKE] ingested_content saved OK, id:', id);
+  console.log('[INTAKE] ingested_content pending saved, id:', id);
   return id;
+}
+
+// UPDATE after analysis completes
+export async function updateIngestedDone(
+  id: string,
+  analysis: BrainAnalysis,
+  routingResult: string,
+): Promise<void> {
+  let supabase;
+  try {
+    supabase = getClient();
+  } catch (err) {
+    console.error('[pitstop] update client init failed:', err);
+    return;
+  }
+
+  const { error } = await supabase
+    .from('ingested_content')
+    .update({
+      processing_status: 'done',
+      summary: analysis.summary,
+      overall_immediate: analysis.overall_immediate,
+      overall_strategic: analysis.overall_strategic,
+      knowledge_count: analysis.knowledge_items.length,
+      routing_result: routingResult,
+      language: analysis.language,
+    })
+    .eq('id', id);
+
+  if (error) {
+    console.error('[INTAKE] IC UPDATE ERROR:', JSON.stringify(error));
+  } else {
+    console.log('[INTAKE] ingested_content updated to done, id:', id);
+  }
 }
 
 export async function saveExtractedKnowledge(

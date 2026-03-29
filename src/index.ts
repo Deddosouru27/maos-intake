@@ -7,7 +7,7 @@ import { downloadAudio } from './handlers/youtube';
 import { transcribeAudio } from './services/transcribe';
 import { analyzeContent } from './services/analyze';
 import { saveToMemory } from './services/memory';
-import { saveIngestedContent, saveExtractedKnowledge, saveToPitstop } from './services/pitstop';
+import { insertIngestedPending, updateIngestedDone, saveExtractedKnowledge, saveToPitstop } from './services/pitstop';
 import { fetchArticle } from './handlers/article';
 import { getFullContext } from './services/projectContext';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, RoutedTo } from './types';
@@ -111,31 +111,13 @@ async function fetchRawContent(
   return { rawText: text, title };
 }
 
-// Phase 2: analyze with retry — errors only on final attempt
-async function analyzeWithRetry(
-  rawText: string,
-  url: string,
-  retries = 3,
-): Promise<BrainAnalysis> {
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await analyzeContent(rawText, url);
-    } catch (err) {
-      if (i === retries - 1) throw err;
-      await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
-    }
-  }
-  throw new Error('unreachable');
-}
-
-// Phase 3: route + persist (fire-and-forget)
+// Phase 3: route + persist
 async function runPipeline(
-  rawText: string,
+  ingestedId: string | null,
   analysis: BrainAnalysis,
   sourceUrl: string,
   sourceType: string,
   contentHash: string,
-  title?: string,
 ): Promise<string> {
   const routed = routeItems(analysis.knowledge_items);
   const hotItems = routed.filter((i) => i.routed_to === 'hot_backlog');
@@ -144,14 +126,12 @@ async function runPipeline(
   const notification = buildNotification(routed);
   const routingResult = `hot:${hotItems.length},strategic:${strategicItems.length},discarded:${discarded.length}`;
 
-  console.log(`[PIPELINE] routing: ${routingResult}, sourceType: ${sourceType}, hash: ${contentHash.slice(0, 8)}`);
+  console.log(`[PIPELINE] routing: ${routingResult}, hash: ${contentHash.slice(0, 8)}`);
 
-  // Save ingested_content first — get id for FK in extracted_knowledge
-  console.log('[PIPELINE] saving ingested_content...');
-  const ingestedId = await saveIngestedContent(
-    rawText, sourceUrl, sourceType, title, contentHash, analysis, routingResult,
-  );
-  console.log('[PIPELINE] ingested_content result id:', ingestedId);
+  // Update ingested_content with analysis results
+  if (ingestedId) {
+    await updateIngestedDone(ingestedId, analysis, routingResult);
+  }
 
   // Save remaining in parallel
   console.log('[PIPELINE] saving extracted_knowledge / ideas / memory...');
@@ -170,47 +150,41 @@ async function runPipeline(
 }
 
 async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis } | { duplicate: true }> {
-  console.log('[INTAKE] 1. Fetching URL...');
-  let rawText: string;
-  let title: string | undefined;
+  // 45s hard timeout — Vercel maxDuration is 60s, leaves buffer for network
+  const timeoutId = setTimeout(() => {
+    throw new Error('[INTAKE] Pipeline timeout (45s)');
+  }, 45000);
+
   try {
-    ({ rawText, title } = await fetchRawContent(url, source));
-  } catch (err) {
-    console.error('[INTAKE] fetch failed:', err instanceof Error ? err.message : err);
-    throw err;
+    console.log('[INTAKE] 1. Fetching URL...');
+    const { rawText, title } = await fetchRawContent(url, source);
+    console.log(`[INTAKE] 2. Fetched ${rawText.length} chars, title: ${title ?? 'none'}`);
+
+    const contentHash = computeHash(rawText);
+    console.log('[INTAKE] 3. Dedup check, hash:', contentHash.slice(0, 8));
+
+    const context = await getFullContext();
+    if (context.recentHashes.includes(contentHash)) {
+      console.log('[INTAKE] Duplicate content, skipping');
+      return { duplicate: true };
+    }
+    console.log('[INTAKE] 4. Context ok — projects:', context.projects.length, 'domains:', context.domains.length);
+
+    // Insert pending BEFORE Haiku — dedup works even if analysis fails
+    console.log('[INTAKE] 4.5. Saving ingested_content (pending)...');
+    const ingestedId = await insertIngestedPending(rawText, url, source, title, contentHash);
+    console.log('[INTAKE] ingested_content id:', ingestedId);
+
+    console.log('[INTAKE] 5. Haiku analysis (single call, no retry)...');
+    const analysis = await analyzeContent(rawText, url);
+    console.log(`[INTAKE] 6. Analysis ok — items: ${analysis.knowledge_items.length}, immediate: ${analysis.overall_immediate}, strategic: ${analysis.overall_strategic}`);
+
+    const notification = await runPipeline(ingestedId, analysis, url, source, contentHash);
+    console.log(`[INTAKE] 7. Done — ${notification}`);
+    return { notification, analysis };
+  } finally {
+    clearTimeout(timeoutId);
   }
-  console.log(`[INTAKE] 2. Fetched ${rawText.length} chars, title: ${title ?? 'none'}`);
-
-  const contentHash = computeHash(rawText);
-  console.log('[INTAKE] 3. Dedup check, hash:', contentHash.slice(0, 8));
-
-  let context;
-  try {
-    context = await getFullContext();
-  } catch (err) {
-    console.error('[INTAKE] getFullContext failed:', err instanceof Error ? err.message : err);
-    throw err;
-  }
-
-  if (context.recentHashes.includes(contentHash)) {
-    console.log('[INTAKE] Duplicate content, skipping');
-    return { duplicate: true };
-  }
-  console.log('[INTAKE] 4. Context ok — projects:', context.projects.length, 'domains:', context.domains.length);
-
-  console.log('[INTAKE] 5. Haiku analysis...');
-  let analysis: BrainAnalysis;
-  try {
-    analysis = await analyzeWithRetry(rawText, url);
-  } catch (err) {
-    console.error('[INTAKE] Haiku analysis failed:', err instanceof Error ? err.message : err);
-    throw err;
-  }
-  console.log(`[INTAKE] 6. Analysis ok — items: ${analysis.knowledge_items.length}, immediate: ${analysis.overall_immediate}, strategic: ${analysis.overall_strategic}`);
-
-  const notification = await runPipeline(rawText, analysis, url, source, contentHash, title);
-  console.log(`[INTAKE] 7. Done — ${notification}`);
-  return { notification, analysis };
 }
 
 app.post('/process', processLimiter, async (req: Request, res: Response) => {
@@ -246,28 +220,24 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
 async function rawTextPipeline(
   rawText: string,
   sourceType: string,
-  label: string,  // used as sourceUrl identifier
+  label: string,
   title?: string,
 ): Promise<void> {
-  console.log('[INTAKE] 2. Parsing content...');
   const contentHash = computeHash(rawText);
 
-  console.log('[INTAKE] 3. Dedup check...');
   const context = await getFullContext();
   if (context.recentHashes.includes(contentHash)) {
     console.log('[INTAKE] Duplicate content, skipping');
     return;
   }
 
-  console.log('[INTAKE] 4. Context assembly done');
+  const ingestedId = await insertIngestedPending(rawText, label, sourceType, title, contentHash);
 
-  console.log('[INTAKE] 5. Haiku analysis...');
-  const analysis = await analyzeWithRetry(rawText, label);
+  console.log('[INTAKE] 5. Haiku analysis (single call)...');
+  const analysis = await analyzeContent(rawText, label);
 
-  console.log('[INTAKE] 6. Routing...');
-  const notification = await runPipeline(rawText, analysis, label, sourceType, contentHash, title);
-
-  console.log(`[INTAKE] 7. Done — ${notification}`);
+  const notification = await runPipeline(ingestedId, analysis, label, sourceType, contentHash);
+  console.log(`[INTAKE] Done — ${notification}`);
 }
 
 interface ProcessFileBody {
@@ -360,9 +330,10 @@ app.post('/batch', processLimiter, async (req: Request, res: Response) => {
         continue;
       }
 
-      const analysis = await analyzeWithRetry(rawText, url);
+      const ingestedId = await insertIngestedPending(rawText, url, source, title, contentHash);
+      const analysis = await analyzeContent(rawText, url);
       results.push(analysis);
-      runPipeline(rawText, analysis, url, source, contentHash, title).catch(console.error);
+      runPipeline(ingestedId, analysis, url, source, contentHash).catch(console.error);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[/batch] error for ${url}:`, message);
