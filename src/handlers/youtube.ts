@@ -1,3 +1,5 @@
+const PROXY_URL = process.env.PROXY_WORKER_URL || '';
+
 export function extractVideoId(url: string): string | null {
   const patterns = [
     /(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
@@ -15,34 +17,66 @@ export async function fetchYouTubeText(url: string): Promise<{ title: string; te
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error(`Cannot extract video ID from URL: ${url}`);
 
-  // Dynamic import — package is ESM, project is CommonJS
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { default: TranscriptClient } = await import('youtube-transcript-api') as any;
+  if (!PROXY_URL) throw new Error('PROXY_WORKER_URL not configured');
 
-  const client = new TranscriptClient({
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-    },
-  });
+  // Step 1: Fetch page HTML via Cloudflare Worker proxy
+  const pageUrl = 'https://www.youtube.com/watch?v=' + videoId;
+  const proxyPageUrl = PROXY_URL + '?url=' + encodeURIComponent(pageUrl);
 
-  await client.ready;
-  const result = await client.getTranscript(videoId);
+  console.log('[INTAKE] YouTube fetching via proxy, videoId:', videoId);
+  const resp = await fetch(proxyPageUrl, { signal: AbortSignal.timeout(15000) });
+  if (!resp.ok) throw new Error(`Proxy returned ${resp.status} for YouTube page`);
+  const html = await resp.text();
 
-  const text =
-    result.languages?.[0]?.transcript
-      ?.map((s: { text: string }) => s.text)
-      .join(' ') || '';
+  // Step 2: Extract title
+  const titleMatch = html.match(/<title>(.+?)<\/title>/);
+  const title = titleMatch ? titleMatch[1].replace(' - YouTube', '').trim() : 'YouTube Video';
 
-  if (!text) {
-    throw new Error(
-      'No captions available for this video. Попробуйте через youtubetotranscript.com и отправьте текст как /idea',
-    );
+  // Step 3: Find captionTracks embedded in page source
+  const captionMatch = html.match(/"captionTracks":\s*(\[.*?\])/);
+  if (!captionMatch) {
+    throw new Error('No captions found for video ' + videoId);
   }
 
-  return { title: result.title || 'YouTube video', text };
-}
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tracks: any[] = JSON.parse(captionMatch[1]);
 
-// Legacy download+Whisper kept for future Railway deployment (no IP blocking)
-// import ytdl from '@distube/ytdl-core';
-// export async function downloadAudio(url): Promise<{ audioPath, title, duration }> { ... }
+  // Priority: en → ru → first available
+  const track =
+    tracks.find((t) => t.languageCode === 'en') ||
+    tracks.find((t) => t.languageCode === 'ru') ||
+    tracks[0];
+
+  if (!track?.baseUrl) {
+    throw new Error('No caption track URL for video ' + videoId);
+  }
+
+  // Step 4: Download caption XML via proxy
+  const captionProxyUrl = PROXY_URL + '?url=' + encodeURIComponent(track.baseUrl);
+  const captionResp = await fetch(captionProxyUrl, { signal: AbortSignal.timeout(10000) });
+  if (!captionResp.ok) throw new Error(`Proxy returned ${captionResp.status} for captions`);
+  const xml = await captionResp.text();
+
+  // Step 5: Parse XML captions to plain text
+  const segments = xml.match(/<text[^>]*>(.*?)<\/text>/gs) || [];
+  const text = segments
+    .map((s) =>
+      s
+        .replace(/<[^>]+>/g, '')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .trim(),
+    )
+    .filter((s) => s.length > 0)
+    .join(' ');
+
+  if (text.length < 20) {
+    throw new Error('Transcript too short for video ' + videoId);
+  }
+
+  console.log(`[INTAKE] YouTube transcript ok: "${title}", ${text.length} chars`);
+  return { title, text };
+}
