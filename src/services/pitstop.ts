@@ -34,7 +34,15 @@ export async function insertIngestedPending(
     processing_status: 'processing',
   };
 
-  console.log('[INTAKE] inserting ingested_content (pending):', { sourceUrl, contentHash: contentHash.slice(0, 8) });
+  console.log('[INTAKE] IC INSERT data:', JSON.stringify({
+    source_url: insertData.source_url,
+    source_type: typeof insertData.source_type + ':' + insertData.source_type,
+    title: insertData.title?.substring(0, 30),
+    content_hash: insertData.content_hash,
+    processing_status: insertData.processing_status,
+    has_raw_text: !!insertData.raw_text,
+    word_count: insertData.word_count,
+  }));
 
   let insertError;
   try {
@@ -44,8 +52,13 @@ export async function insertIngestedPending(
     return null;
   }
 
+  console.log('[INTAKE] IC INSERT result:', JSON.stringify({
+    error: insertError?.message,
+    code: insertError?.code,
+    details: insertError?.details,
+  }));
+
   if (insertError) {
-    console.error('[INTAKE] IC INSERT ERROR:', JSON.stringify(insertError));
     return null;
   }
 
