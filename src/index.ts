@@ -6,7 +6,6 @@ import { extractFileText, detectFileSource, FileSourceType } from './handlers/fi
 import { downloadAudio } from './handlers/youtube';
 import { transcribeAudio } from './services/transcribe';
 import { analyzeContent } from './services/analyze';
-import { saveToMemory } from './services/memory';
 import { insertIngestedPending, updateIngestedDone, saveExtractedKnowledge, saveToPitstop } from './services/pitstop';
 import { fetchArticle } from './handlers/article';
 import { getFullContext } from './services/projectContext';
@@ -133,15 +132,14 @@ async function runPipeline(
     await updateIngestedDone(ingestedId, analysis, routingResult);
   }
 
-  // Save remaining in parallel
-  console.log('[PIPELINE] saving extracted_knowledge / ideas / memory...');
+  // Save in parallel
+  console.log('[PIPELINE] saving extracted_knowledge / ideas...');
   const results = await Promise.allSettled([
     saveExtractedKnowledge(routed, ingestedId, sourceUrl, sourceType),
     saveToPitstop(analysis, hotItems, sourceType, sourceUrl),
-    saveToMemory(analysis, strategicItems, sourceUrl, sourceUrl, sourceType),
   ]);
   results.forEach((r, i) => {
-    const label = ['extracted_knowledge', 'ideas', 'memory'][i];
+    const label = ['extracted_knowledge', 'ideas'][i];
     if (r.status === 'rejected') console.error(`[PIPELINE] ${label} failed:`, r.reason);
     else console.log(`[PIPELINE] ${label} ok`);
   });
