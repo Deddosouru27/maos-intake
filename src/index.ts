@@ -30,8 +30,11 @@ const processLimiter = rateLimit({
 type Source = 'youtube' | 'instagram' | 'article' | 'url' | 'thread';
 
 interface ProcessBody {
-  url: string;
+  url?: string;
   source?: Source;
+  text?: string;
+  title?: string;
+  source_type?: string;
 }
 
 function detectSource(url: string, provided?: Source): Source {
@@ -230,7 +233,33 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
 }
 
 app.post('/process', processLimiter, async (req: Request, res: Response) => {
-  const { url, source: providedSource } = req.body as ProcessBody;
+  const { url, source: providedSource, text: bodyText, title: bodyTitle, source_type: bodySourceType } = req.body as ProcessBody;
+
+  // Manual text paste — skip fetch, go directly to pipeline
+  if ((bodyText && !url) || url === 'manual-paste') {
+    const rawText = bodyText ?? '';
+    if (!rawText.trim()) {
+      res.status(400).json({ error: 'text is required for manual paste' });
+      return;
+    }
+    const title = bodyTitle || 'Manual paste';
+    const sourceType = bodySourceType || 'text';
+    const label = `manual:${title.slice(0, 50)}`;
+
+    try {
+      const result = await rawTextPipeline(rawText, sourceType, label, title);
+      if ('duplicate' in result) {
+        res.json({ status: 'duplicate', notification: '♻️ Этот контент уже обрабатывался' });
+      } else {
+        res.json({ status: 'done', notification: result.notification, ...result.analysis });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('[/process manual] pipeline failed:', message);
+      res.status(500).json({ error: message });
+    }
+    return;
+  }
 
   if (!url) {
     res.status(400).json({ error: 'url is required' });
@@ -263,19 +292,19 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
   }
 });
 
-// Shared pipeline for pre-fetched text (files, etc.)
+// Shared pipeline for pre-fetched text (files, manual paste, etc.)
 async function rawTextPipeline(
   rawText: string,
   sourceType: string,
   label: string,
   title?: string,
-): Promise<void> {
+): Promise<{ notification: string; analysis: BrainAnalysis } | { duplicate: true }> {
   const contentHash = computeHash(rawText);
 
   const context = await getFullContext();
   if (context.recentHashes.includes(contentHash)) {
     console.log('[INTAKE] Duplicate content, skipping');
-    return;
+    return { duplicate: true };
   }
 
   const ingestedId = await insertIngestedPending(rawText, label, sourceType, title, contentHash);
@@ -285,6 +314,7 @@ async function rawTextPipeline(
 
   const notification = await runPipeline(ingestedId, analysis, label, sourceType, contentHash);
   console.log(`[INTAKE] Done — ${notification}`);
+  return { notification, analysis };
 }
 
 interface ProcessFileBody {
