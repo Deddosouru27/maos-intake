@@ -140,11 +140,18 @@ async function runPipeline(
   const routed = routeItems(analysis.knowledge_items);
   const hotItems = routed.filter((i) => i.routed_to === 'hot_backlog');
   const strategicItems = routed.filter((i) => i.routed_to === 'knowledge_base');
+  const discarded = routed.filter((i) => i.routed_to === 'discarded');
   const notification = buildNotification(routed);
+  const routingResult = `hot:${hotItems.length},strategic:${strategicItems.length},discarded:${discarded.length}`;
 
+  // Save ingested_content first — get id for FK in extracted_knowledge
+  const ingestedId = await saveIngestedContent(
+    rawText, sourceUrl, sourceType, title, contentHash, analysis, routingResult,
+  );
+
+  // Save remaining in parallel
   await Promise.allSettled([
-    saveIngestedContent(rawText, sourceUrl, sourceType, title, contentHash),
-    saveExtractedKnowledge(routed, sourceUrl, sourceType),
+    saveExtractedKnowledge(routed, ingestedId, sourceUrl, sourceType),
     saveToPitstop(analysis, hotItems, sourceType, sourceUrl),
     saveToMemory(analysis, strategicItems, sourceUrl, sourceUrl, sourceType),
   ]);
