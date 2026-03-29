@@ -95,99 +95,39 @@ export async function getFullContext(): Promise<FullContext> {
   return cachedContext;
 }
 
-export function buildSystemPrompt(context: FullContext): string {
-  const MAX_PROJECTS_CHARS = 1000;
-  const MAX_DOMAINS_CHARS = 700;
-  const MAX_TASKS_CHARS = 300;
+const MAX_CONTEXT = 800;
 
-  let projectsSection =
-    context.projects.length === 0
-      ? 'Проектов нет в базе.'
-      : context.projects
-          .map((p, i) => {
-            const lines = [`${i + 1}. **${p.name}** — ${p.description}`];
-            if (p.current_focus) lines.push(`   Текущий фокус: ${p.current_focus}`);
-            if (p.current_needs) lines.push(`   Текущие потребности: ${p.current_needs}`);
-            if (p.long_term_goals) lines.push(`   Долгосрочные цели: ${p.long_term_goals}`);
-            if (p.tech_stack?.length) lines.push(`   Стек: ${p.tech_stack.join(', ')}`);
-            return lines.join('\n');
-          })
-          .join('\n\n');
-  if (projectsSection.length > MAX_PROJECTS_CHARS) {
-    projectsSection = projectsSection.slice(0, MAX_PROJECTS_CHARS) + '...[обрезано]';
+export function buildContextString(context: FullContext): string {
+  const parts: string[] = [];
+
+  if (context.projects.length > 0) {
+    const projects = context.projects
+      .map((p) => {
+        const bits = [p.name];
+        if (p.current_focus) bits.push(`focus: ${p.current_focus}`);
+        if (p.current_needs) bits.push(`needs: ${p.current_needs}`);
+        return bits.join(' — ');
+      })
+      .join('; ');
+    parts.push(`Projects: ${projects}`);
   }
 
-  let domainsSection =
-    context.domains.length === 0
-      ? 'Областей интересов нет в базе.'
-      : [...context.domains]
-          .sort((a, b) => b.priority - a.priority)
-          .map((d, i) => {
-            const examples = d.examples?.length
-              ? ` Примеры: ${d.examples.join(', ')}.`
-              : '';
-            return `${i + 1}. **${d.name}** (приоритет ${d.priority}) — ${d.description}.${examples}`;
-          })
-          .join('\n');
-  if (domainsSection.length > MAX_DOMAINS_CHARS) {
-    domainsSection = domainsSection.slice(0, MAX_DOMAINS_CHARS) + '...[обрезано]';
+  if (context.domains.length > 0) {
+    const domains = [...context.domains]
+      .sort((a, b) => b.priority - a.priority)
+      .map((d) => d.name)
+      .join(', ');
+    parts.push(`Domains: ${domains}`);
   }
 
-  let tasksSection =
-    context.tasks.length === 0
-      ? 'Активных задач нет.'
-      : context.tasks.map((t) => `• ${t.title}`).join('\n');
-  if (tasksSection.length > MAX_TASKS_CHARS) {
-    tasksSection = tasksSection.slice(0, MAX_TASKS_CHARS) + '...[обрезано]';
+  if (context.tasks.length > 0) {
+    const tasks = context.tasks
+      .slice(0, 5)
+      .map((t) => t.title)
+      .join('; ');
+    parts.push(`Active tasks: ${tasks}`);
   }
 
-  return `Ты — инженерный аналитик и исследователь для системы MAOS. Ты выполняешь ДВЕ роли одновременно:
-
-РОЛЬ 1 — ИНЖЕНЕР: ищешь конкретные решения для текущих проблем проектов.
-РОЛЬ 2 — ИССЛЕДОВАТЕЛЬ: накапливаешь ценные знания для широких тематических направлений, даже если они не нужны прямо сейчас.
-
-## Наши проекты (из базы данных)
-
-${projectsSection}
-
-## Широкие области интересов (из базы данных)
-
-${domainsSection}
-
-Мы копим знания по ВСЕМ этим направлениям. Даже если сейчас нет активного проекта по теме — знание ценно если оно в рамках наших domains.
-
-## Над чем работаем сейчас
-
-${tasksSection}
-
-## Как анализировать
-
-ШАГ 1. Прочитай контент. Определи основную тему.
-
-ШАГ 2. IMMEDIATE RELEVANCE — спроси: "Решает ли это конкретную текущую проблему из current_needs?" Если да — immediate_relevance высокий + solves_need заполнен.
-
-ШАГ 3. STRATEGIC RELEVANCE — спроси: "Попадает ли это в наши knowledge_domains?" Контент про AI агентов при отсутствии прямой задачи — всё равно strategic 0.7+ если domain "AI агенты" active. Контент про кулинарию — strategic 0.0.
-
-ШАГ 4. NOVELTY — спроси: "Это новое знание или мы уже это знаем/обсуждали?" Если статья повторяет банальности ("AI это будущее") — novelty 0.1. Если описывает конкретный новый паттерн/инструмент — novelty 0.8+.
-
-ШАГ 5. Для каждой единицы знания определи knowledge_type:
-- actionable_idea: конкретное действие ("добавить retry в Runner")
-- tool_or_library: готовый инструмент ("LangGraph для оркестрации агентов")
-- architecture_pattern: паттерн ("circuit breaker для API вызовов")
-- code_snippet: готовый код
-- insight: ценное наблюдение
-- technique: методика
-- case_study: кейс реализации
-- strategic_idea: идея для будущего проекта
-- lesson_learned: урок из чужого опыта
-
-## Правила
-
-1. ВСЕ на русском языке.
-2. Извлекай 7-10 ключевых инсайтов, идей и уроков из контента. ИГНОРИРУЙ: рекламные вставки, спонсорские блоки, партнёрские предложения, промо-плагины и офтопик. Извлекай только знания по основной теме контента. Каждый инсайт должен быть напрямую применим или стратегически важен для построения AI-систем, автоматизации или оптимизации бизнеса.
-3. НЕ ВЫДУМЫВАЙ знания которых нет в контенте.
-4. Контент может быть: нерелевантен сейчас НО стратегически ценен. Это НЕ причина выбрасывать.
-5. Контент вне ВСЕХ knowledge_domains (кулинария, спорт, личная жизнь) → immediate 0.0, strategic 0.0.
-6. Если в контенте есть ГОТОВЫЙ КОД — обязательно has_ready_code: true.
-7. priority_signal: true ТОЛЬКО если: критический баг в нашем стеке, готовый open-source заменяющий наш самопис, существенное удешевление наших сервисов.`;
+  const result = parts.join('\n');
+  return result.length > MAX_CONTEXT ? result.substring(0, MAX_CONTEXT) : result;
 }

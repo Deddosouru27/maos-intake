@@ -1,8 +1,17 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { BrainAnalysis } from '../types';
-import { getFullContext, buildSystemPrompt } from './projectContext';
+import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel } from '../types';
+import { getFullContext, buildContextString } from './projectContext';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+const SYSTEM_PROMPT = `You are a knowledge extraction engine. Extract insights from content.
+RULES:
+Extract 8-12 insights. More is better than fewer.
+IGNORE: ads, sponsors, promotions, self-promotion, affiliate links, off-topic tangents.
+Each insight must be actionable or strategically valuable.
+Be CONCISE. Maximum 2 sentences per insight.
+business_value: 1 sentence only.
+Output ONLY valid JSON. No markdown, no commentary.`;
 
 async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -54,6 +63,64 @@ function parseHaikuJSON<T>(text: string): T {
   }
 }
 
+interface CompactItem {
+  t: string;
+  c: string;
+  b: string;
+  s: number;
+  r: number;
+}
+
+interface CompactResponse {
+  items: CompactItem[];
+  summary: string;
+}
+
+function expandCompactResponse(parsed: CompactResponse): BrainAnalysis {
+  const knowledge_items: KnowledgeItem[] = (parsed.items ?? []).map((item) => {
+    const kt: KnowledgeType =
+      item.t === 'pattern' ? 'architecture_pattern'
+      : item.t === 'tool' ? 'tool_or_library'
+      : item.t === 'lesson' ? 'lesson_learned'
+      : item.t === 'idea' ? 'actionable_idea'
+      : item.t === 'technique' ? 'technique'
+      : 'insight';
+    return {
+      knowledge_type: kt,
+      content: item.c ?? '',
+      business_value: item.b ?? null,
+      strategic_relevance: item.s ?? 0,
+      immediate_relevance: item.r ?? 0,
+      project: null,
+      domains: [],
+      solves_need: null,
+      novelty: 0.5,
+      effort: 'medium' as EffortLevel,
+      has_ready_code: false,
+      tags: [],
+    };
+  });
+
+  const overall_immediate = knowledge_items.length > 0
+    ? knowledge_items.reduce((sum, i) => sum + i.immediate_relevance, 0) / knowledge_items.length
+    : 0;
+  const overall_strategic = knowledge_items.length > 0
+    ? knowledge_items.reduce((sum, i) => sum + i.strategic_relevance, 0) / knowledge_items.length
+    : 0;
+  const priority_signal = knowledge_items.some((i) => i.immediate_relevance >= 0.8);
+
+  return {
+    summary: parsed.summary ?? '',
+    knowledge_items,
+    overall_immediate,
+    overall_strategic,
+    priority_signal,
+    priority_reason: '',
+    category: 'other',
+    language: 'other',
+  };
+}
+
 const MAX_CHARS_FOR_HAIKU = 12000;
 
 export async function analyzeContent(text: string, source: string): Promise<BrainAnalysis> {
@@ -62,42 +129,35 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
     : text;
 
   const context = await getFullContext();
-  const systemPrompt = buildSystemPrompt(context);
+  const trimmedContext = buildContextString(context);
 
-  const userPrompt = `Проанализируй и верни ТОЛЬКО JSON без markdown:
+  const userPrompt = `Content to analyze:
+"""
+${trimmedText}
+"""
+Context about the user's projects and priorities:
+"""
+${trimmedContext}
+"""
+Extract 8-12 insights as JSON. Remember: CONCISE, no ads, only actionable insights.
 
 {
-  "summary": "2-3 предложения на русском",
-  "knowledge_items": [
+  "items": [
     {
-      "content": "Конкретное описание знания",
-      "knowledge_type": "actionable_idea | tool_or_library | architecture_pattern | code_snippet | insight | technique | case_study | strategic_idea | lesson_learned",
-      "project": "название проекта или null",
-      "domains": ["название domain из списка"],
-      "solves_need": "какую current_need решает или null",
-      "immediate_relevance": 0.0,
-      "strategic_relevance": 0.0,
-      "novelty": 0.0,
-      "effort": "trivial | low | medium | high | huge",
-      "has_ready_code": false,
-      "business_value": "Одно предложение — что это даст Артуру как директору, без технических терминов",
-      "tags": ["теги"]
+      "t": "insight type: insight|pattern|tool|lesson|idea|technique",
+      "c": "Insight content. Max 2 sentences.",
+      "b": "Business value. 1 sentence.",
+      "s": 0.7,
+      "r": 0.5
     }
   ],
-  "overall_immediate": 0.0,
-  "overall_strategic": 0.0,
-  "priority_signal": false,
-  "priority_reason": "",
-  "category": "ai | dev | infrastructure | product | business | content | other",
-  "language": "ru | en | other"
-}
-
-Контент: ${trimmedText}`;
+  "summary": "3 sentence summary of entire content."
+}`;
 
   const message = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 2048,
-    system: systemPrompt,
+    max_tokens: 1200,
+    system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: userPrompt }],
   });
 
@@ -108,17 +168,19 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
 
   const raw = message.content[0].type === 'text' ? message.content[0].text : '';
 
-  let parsed: BrainAnalysis;
+  let compact: CompactResponse;
   try {
-    parsed = parseHaikuJSON<BrainAnalysis>(raw);
+    compact = parseHaikuJSON<CompactResponse>(raw);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(`Failed to parse Haiku response: ${msg}`);
   }
 
-  if (parsed.priority_signal) {
-    await sendTelegramAlert(source, parsed);
+  const analysis = expandCompactResponse(compact);
+
+  if (analysis.priority_signal) {
+    await sendTelegramAlert(source, analysis);
   }
 
-  return parsed;
+  return analysis;
 }
