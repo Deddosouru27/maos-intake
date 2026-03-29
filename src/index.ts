@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import express, { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { waitUntil } from '@vercel/functions';
+import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { downloadAudio } from './handlers/youtube';
 import { transcribeAudio } from './services/transcribe';
 import { analyzeContent } from './services/analyze';
@@ -209,6 +210,68 @@ app.post('/process', processLimiter, (req: Request, res: Response) => {
   waitUntil(
     fullPipeline(url, source).catch((err) => {
       console.error(`[/process] pipeline failed for ${url}:`, err instanceof Error ? err.message : err);
+    }),
+  );
+});
+
+// Shared pipeline for pre-fetched text (files, etc.)
+async function rawTextPipeline(
+  rawText: string,
+  sourceType: string,
+  label: string,  // used as sourceUrl identifier
+  title?: string,
+): Promise<void> {
+  console.log('[INTAKE] 2. Parsing content...');
+  const contentHash = computeHash(rawText);
+
+  console.log('[INTAKE] 3. Dedup check...');
+  const context = await getFullContext();
+  if (context.recentHashes.includes(contentHash)) {
+    console.log('[INTAKE] Duplicate content, skipping');
+    return;
+  }
+
+  console.log('[INTAKE] 4. Context assembly done');
+
+  console.log('[INTAKE] 5. Haiku analysis...');
+  const analysis = await analyzeWithRetry(rawText, label);
+
+  console.log('[INTAKE] 6. Routing...');
+  const notification = await runPipeline(rawText, analysis, label, sourceType, contentHash, title);
+
+  console.log(`[INTAKE] 7. Done — ${notification}`);
+}
+
+interface ProcessFileBody {
+  buffer: string;      // base64
+  filename: string;
+  mime_type: string;
+}
+
+app.post('/process-file', processLimiter, (req: Request, res: Response) => {
+  const { buffer, filename, mime_type } = req.body as ProcessFileBody;
+
+  if (!buffer || !filename || !mime_type) {
+    res.status(400).json({ error: 'buffer, filename, and mime_type are required' });
+    return;
+  }
+
+  const sourceType = detectFileSource(mime_type);
+  if (!sourceType) {
+    res.status(400).json({ error: `Unsupported mime_type: ${mime_type}` });
+    return;
+  }
+
+  res.json({ status: 'processing', filename });
+
+  waitUntil(
+    (async () => {
+      console.log(`[INTAKE] 1. Extracting text from file: ${filename} (${sourceType})`);
+      const fileBuffer = Buffer.from(buffer, 'base64');
+      const rawText = await extractFileText(fileBuffer, sourceType as FileSourceType);
+      await rawTextPipeline(rawText, sourceType, `file:${filename}`, filename);
+    })().catch((err) => {
+      console.error(`[/process-file] pipeline failed for ${filename}:`, err instanceof Error ? err.message : err);
     }),
   );
 });

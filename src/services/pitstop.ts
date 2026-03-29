@@ -28,7 +28,7 @@ export async function saveIngestedContent(
 
   const insertData = {
     source_url: sourceUrl,
-    source_type: sourceType || 'article',   // NOT NULL — never let this be empty
+    source_type: sourceType || 'unknown',   // NOT NULL — never let this be empty
     raw_text: rawText.slice(0, 50000),
     title: title ?? null,
     content_hash: contentHash,
