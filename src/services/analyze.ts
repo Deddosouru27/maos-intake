@@ -54,8 +54,12 @@ function parseHaikuJSON<T>(text: string): T {
   }
 }
 
+const MAX_CHARS_FOR_HAIKU = 12000;
+
 export async function analyzeContent(text: string, source: string): Promise<BrainAnalysis> {
-  const truncated = text.length > 8000 ? text.slice(0, 8000) + '...' : text;
+  const trimmedText = text.length > MAX_CHARS_FOR_HAIKU
+    ? text.substring(0, MAX_CHARS_FOR_HAIKU) + '\n[...текст обрезан...]'
+    : text;
 
   const context = await getFullContext();
   const systemPrompt = buildSystemPrompt(context);
@@ -88,7 +92,7 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
   "language": "ru | en | other"
 }
 
-Контент: ${truncated}`;
+Контент: ${trimmedText}`;
 
   const message = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
@@ -97,7 +101,10 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
     messages: [{ role: 'user', content: userPrompt }],
   });
 
-  console.log('[INTAKE] Haiku tokens used:', message.usage?.output_tokens, '/ 2048');
+  const inputTokens = message.usage?.input_tokens ?? 0;
+  const outputTokens = message.usage?.output_tokens ?? 0;
+  const cost = (inputTokens * 0.25 + outputTokens * 1.25) / 1_000_000;
+  console.log(`[INTAKE] Haiku cost: $${cost.toFixed(4)} (in:${inputTokens} out:${outputTokens})`);
 
   const raw = message.content[0].type === 'text' ? message.content[0].text : '';
 

@@ -96,7 +96,11 @@ export async function getFullContext(): Promise<FullContext> {
 }
 
 export function buildSystemPrompt(context: FullContext): string {
-  const projectsSection =
+  const MAX_PROJECTS_CHARS = 1000;
+  const MAX_DOMAINS_CHARS = 700;
+  const MAX_TASKS_CHARS = 300;
+
+  let projectsSection =
     context.projects.length === 0
       ? 'Проектов нет в базе.'
       : context.projects
@@ -109,8 +113,11 @@ export function buildSystemPrompt(context: FullContext): string {
             return lines.join('\n');
           })
           .join('\n\n');
+  if (projectsSection.length > MAX_PROJECTS_CHARS) {
+    projectsSection = projectsSection.slice(0, MAX_PROJECTS_CHARS) + '...[обрезано]';
+  }
 
-  const domainsSection =
+  let domainsSection =
     context.domains.length === 0
       ? 'Областей интересов нет в базе.'
       : [...context.domains]
@@ -122,11 +129,17 @@ export function buildSystemPrompt(context: FullContext): string {
             return `${i + 1}. **${d.name}** (приоритет ${d.priority}) — ${d.description}.${examples}`;
           })
           .join('\n');
+  if (domainsSection.length > MAX_DOMAINS_CHARS) {
+    domainsSection = domainsSection.slice(0, MAX_DOMAINS_CHARS) + '...[обрезано]';
+  }
 
-  const tasksSection =
+  let tasksSection =
     context.tasks.length === 0
       ? 'Активных задач нет.'
       : context.tasks.map((t) => `• ${t.title}`).join('\n');
+  if (tasksSection.length > MAX_TASKS_CHARS) {
+    tasksSection = tasksSection.slice(0, MAX_TASKS_CHARS) + '...[обрезано]';
+  }
 
   return `Ты — инженерный аналитик и исследователь для системы MAOS. Ты выполняешь ДВЕ роли одновременно:
 
@@ -171,7 +184,7 @@ ${tasksSection}
 ## Правила
 
 1. ВСЕ на русском языке.
-2. Максимум 7 единиц знания на один контент.
+2. Извлекай 7-10 ключевых инсайтов, идей и уроков из контента.
 3. НЕ ВЫДУМЫВАЙ знания которых нет в контенте.
 4. Контент может быть: нерелевантен сейчас НО стратегически ценен. Это НЕ причина выбрасывать.
 5. Контент вне ВСЕХ knowledge_domains (кулинария, спорт, личная жизнь) → immediate 0.0, strategic 0.0.
