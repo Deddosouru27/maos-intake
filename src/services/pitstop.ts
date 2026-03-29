@@ -112,6 +112,7 @@ export async function saveExtractedKnowledge(
     novelty: item.novelty,
     effort: item.effort,
     has_ready_code: item.has_ready_code,
+    business_value: item.business_value ?? null,
     tags: item.tags,
     routed_to: [item.routed_to], // text[] — wrap single value in array
     language: null,

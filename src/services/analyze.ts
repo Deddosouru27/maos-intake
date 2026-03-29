@@ -50,6 +50,7 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
       "novelty": 0.0,
       "effort": "trivial | low | medium | high | huge",
       "has_ready_code": false,
+      "business_value": "Одно предложение — что это даст Артуру как директору, без технических терминов",
       "tags": ["теги"]
     }
   ],

@@ -38,6 +38,7 @@ export interface KnowledgeItem {
   novelty: number;
   effort: EffortLevel;
   has_ready_code: boolean;
+  business_value: string | null;
   tags: string[];
 }
 
