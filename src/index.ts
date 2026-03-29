@@ -145,17 +145,27 @@ async function runPipeline(
   const notification = buildNotification(routed);
   const routingResult = `hot:${hotItems.length},strategic:${strategicItems.length},discarded:${discarded.length}`;
 
+  console.log(`[PIPELINE] routing: ${routingResult}, sourceType: ${sourceType}, hash: ${contentHash.slice(0, 8)}`);
+
   // Save ingested_content first — get id for FK in extracted_knowledge
+  console.log('[PIPELINE] saving ingested_content...');
   const ingestedId = await saveIngestedContent(
     rawText, sourceUrl, sourceType, title, contentHash, analysis, routingResult,
   );
+  console.log('[PIPELINE] ingested_content result id:', ingestedId);
 
   // Save remaining in parallel
-  await Promise.allSettled([
+  console.log('[PIPELINE] saving extracted_knowledge / ideas / memory...');
+  const results = await Promise.allSettled([
     saveExtractedKnowledge(routed, ingestedId, sourceUrl, sourceType),
     saveToPitstop(analysis, hotItems, sourceType, sourceUrl),
     saveToMemory(analysis, strategicItems, sourceUrl, sourceUrl, sourceType),
   ]);
+  results.forEach((r, i) => {
+    const label = ['extracted_knowledge', 'ideas', 'memory'][i];
+    if (r.status === 'rejected') console.error(`[PIPELINE] ${label} failed:`, r.reason);
+    else console.log(`[PIPELINE] ${label} ok`);
+  });
 
   return notification;
 }
@@ -163,26 +173,44 @@ async function runPipeline(
 // Full async pipeline — runs via waitUntil after response is sent
 async function fullPipeline(url: string, source: Source): Promise<void> {
   console.log('[INTAKE] 1. Fetching URL...');
-  const { rawText, title } = await fetchRawContent(url, source);
+  let rawText: string;
+  let title: string | undefined;
+  try {
+    ({ rawText, title } = await fetchRawContent(url, source));
+  } catch (err) {
+    console.error('[INTAKE] fetch failed:', err instanceof Error ? err.message : err);
+    throw err;
+  }
+  console.log(`[INTAKE] 2. Fetched ${rawText.length} chars, title: ${title ?? 'none'}`);
 
-  console.log('[INTAKE] 2. Parsing content...');
   const contentHash = computeHash(rawText);
+  console.log('[INTAKE] 3. Dedup check, hash:', contentHash.slice(0, 8));
 
-  console.log('[INTAKE] 3. Dedup check...');
-  const context = await getFullContext();
+  let context;
+  try {
+    context = await getFullContext();
+  } catch (err) {
+    console.error('[INTAKE] getFullContext failed:', err instanceof Error ? err.message : err);
+    throw err;
+  }
+
   if (context.recentHashes.includes(contentHash)) {
     console.log('[INTAKE] Duplicate content, skipping');
     return;
   }
-
-  console.log('[INTAKE] 4. Context assembly done (cached or freshly loaded)');
+  console.log('[INTAKE] 4. Context ok — projects:', context.projects.length, 'domains:', context.domains.length);
 
   console.log('[INTAKE] 5. Haiku analysis...');
-  const analysis = await analyzeWithRetry(rawText, url);
+  let analysis: BrainAnalysis;
+  try {
+    analysis = await analyzeWithRetry(rawText, url);
+  } catch (err) {
+    console.error('[INTAKE] Haiku analysis failed:', err instanceof Error ? err.message : err);
+    throw err;
+  }
+  console.log(`[INTAKE] 6. Analysis ok — items: ${analysis.knowledge_items.length}, immediate: ${analysis.overall_immediate}, strategic: ${analysis.overall_strategic}`);
 
-  console.log('[INTAKE] 6. Routing...');
   const notification = await runPipeline(rawText, analysis, url, source, contentHash, title);
-
   console.log(`[INTAKE] 7. Done — ${notification}`);
 }
 
