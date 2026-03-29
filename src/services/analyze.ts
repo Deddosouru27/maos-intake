@@ -30,8 +30,28 @@ async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promi
 
 function parseHaikuJSON<T>(text: string): T {
   const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('No JSON found in: ' + text.substring(0, 100));
-  return JSON.parse(jsonMatch[0]) as T;
+  if (!jsonMatch) {
+    throw new Error('No JSON found in: ' + text.substring(0, 200));
+  }
+  try {
+    return JSON.parse(jsonMatch[0]) as T;
+  } catch {
+    // JSON truncated — try to repair closing brackets
+    let fixed = jsonMatch[0];
+    fixed = fixed.replace(/,\s*$/, '');
+    const opens = (fixed.match(/\[/g) || []).length - (fixed.match(/\]/g) || []).length;
+    const braces = (fixed.match(/\{/g) || []).length - (fixed.match(/\}/g) || []).length;
+    if (opens > 0) fixed += ']'.repeat(opens);
+    if (braces > 0) fixed += '}'.repeat(braces);
+    fixed = fixed.replace(/,\s*([}\]])/g, '$1');
+    try {
+      return JSON.parse(fixed) as T;
+    } catch (e2) {
+      const msg = e2 instanceof Error ? e2.message : String(e2);
+      console.error('[INTAKE] JSON parse final fail:', msg, 'raw last 100:', text.slice(-100));
+      throw new Error('JSON parse failed after repair: ' + msg);
+    }
+  }
 }
 
 export async function analyzeContent(text: string, source: string): Promise<BrainAnalysis> {
@@ -72,18 +92,21 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
 
   const message = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 1024,
+    max_tokens: 2048,
     system: systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
   });
+
+  console.log('[INTAKE] Haiku tokens used:', message.usage?.output_tokens, '/ 2048');
 
   const raw = message.content[0].type === 'text' ? message.content[0].text : '';
 
   let parsed: BrainAnalysis;
   try {
     parsed = parseHaikuJSON<BrainAnalysis>(raw);
-  } catch {
-    throw new Error(`Failed to parse Haiku response: ${raw}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`Failed to parse Haiku response: ${msg}`);
   }
 
   if (parsed.priority_signal) {
