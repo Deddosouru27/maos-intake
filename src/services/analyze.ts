@@ -28,6 +28,12 @@ async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promi
   }
 }
 
+function parseHaikuJSON<T>(text: string): T {
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('No JSON found in: ' + text.substring(0, 100));
+  return JSON.parse(jsonMatch[0]) as T;
+}
+
 export async function analyzeContent(text: string, source: string): Promise<BrainAnalysis> {
   const truncated = text.length > 8000 ? text.slice(0, 8000) + '...' : text;
 
@@ -75,12 +81,7 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
 
   let parsed: BrainAnalysis;
   try {
-    let cleaned = raw.trim();
-    if (cleaned.startsWith('```')) {
-      cleaned = cleaned.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-    }
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleaned) as BrainAnalysis;
+    parsed = parseHaikuJSON<BrainAnalysis>(raw);
   } catch {
     throw new Error(`Failed to parse Haiku response: ${raw}`);
   }

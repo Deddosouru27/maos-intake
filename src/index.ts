@@ -432,7 +432,8 @@ app.post('/summarize', async (req: Request, res: Response) => {
 
     const raw = message.content[0].type === 'text' ? message.content[0].text : '';
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw) as {
+    if (!jsonMatch) throw new Error('No JSON found in Haiku response: ' + raw.substring(0, 100));
+    const parsed = JSON.parse(jsonMatch[0]) as {
       summary: string;
       keyPoints: string[];
     };
