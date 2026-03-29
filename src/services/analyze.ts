@@ -75,8 +75,12 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
 
   let parsed: BrainAnalysis;
   try {
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw) as BrainAnalysis;
+    let cleaned = raw.trim();
+    if (cleaned.startsWith('```')) {
+      cleaned = cleaned.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+    }
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleaned) as BrainAnalysis;
   } catch {
     throw new Error(`Failed to parse Haiku response: ${raw}`);
   }
