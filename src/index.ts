@@ -205,6 +205,14 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
     return;
   }
 
+  if (source === 'youtube') {
+    res.json({
+      status: 'youtube_unavailable',
+      notification: '🎬 YouTube пока не поддерживается. Скопируй транскрипт через youtubetotranscript.com и отправь текстом через /idea',
+    });
+    return;
+  }
+
   try {
     const result = await fullPipeline(url, source);
     if ('duplicate' in result) {
