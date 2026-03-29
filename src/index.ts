@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import { createHash } from 'crypto';
 import express, { Request, Response } from 'express';
-import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
@@ -12,16 +11,24 @@ import { getFullContext } from './services/projectContext';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, RoutedTo } from './types';
 
 const app = express();
-app.use(cors({
-  origin: [
+app.use((req, res, next) => {
+  const allowedOrigins = [
     'https://pitstop-dusky.vercel.app',
     'http://localhost:5173',
     'http://localhost:3000',
-  ],
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
-app.options('*', cors());
+  ];
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
 app.use(express.json());
 app.use((req: Request, _res: Response, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
