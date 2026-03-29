@@ -2,7 +2,6 @@ import 'dotenv/config';
 import { createHash } from 'crypto';
 import express, { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
-import { waitUntil } from '@vercel/functions';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { downloadAudio } from './handlers/youtube';
 import { transcribeAudio } from './services/transcribe';
@@ -170,8 +169,7 @@ async function runPipeline(
   return notification;
 }
 
-// Full async pipeline — runs via waitUntil after response is sent
-async function fullPipeline(url: string, source: Source): Promise<void> {
+async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis } | { duplicate: true }> {
   console.log('[INTAKE] 1. Fetching URL...');
   let rawText: string;
   let title: string | undefined;
@@ -196,7 +194,7 @@ async function fullPipeline(url: string, source: Source): Promise<void> {
 
   if (context.recentHashes.includes(contentHash)) {
     console.log('[INTAKE] Duplicate content, skipping');
-    return;
+    return { duplicate: true };
   }
   console.log('[INTAKE] 4. Context ok — projects:', context.projects.length, 'domains:', context.domains.length);
 
@@ -212,9 +210,10 @@ async function fullPipeline(url: string, source: Source): Promise<void> {
 
   const notification = await runPipeline(rawText, analysis, url, source, contentHash, title);
   console.log(`[INTAKE] 7. Done — ${notification}`);
+  return { notification, analysis };
 }
 
-app.post('/process', processLimiter, (req: Request, res: Response) => {
+app.post('/process', processLimiter, async (req: Request, res: Response) => {
   const { url, source: providedSource } = req.body as ProcessBody;
 
   if (!url) {
@@ -225,21 +224,22 @@ app.post('/process', processLimiter, (req: Request, res: Response) => {
   const source = detectSource(url, providedSource);
 
   if (source === 'instagram') {
-    res.json({
-      status: 'unsupported',
-      notification: '📭 Instagram не поддерживается',
-    });
+    res.json({ status: 'unsupported', notification: '📭 Instagram не поддерживается' });
     return;
   }
 
-  // waitUntil MUST be called before res.json — otherwise Vercel kills the process
-  waitUntil(
-    fullPipeline(url, source).catch((err) => {
-      console.error(`[/process] pipeline failed for ${url}:`, err instanceof Error ? err.message : err);
-    }),
-  );
-
-  res.json({ status: 'processing', url });
+  try {
+    const result = await fullPipeline(url, source);
+    if ('duplicate' in result) {
+      res.json({ status: 'duplicate', notification: '♻️ Этот контент уже обрабатывался' });
+    } else {
+      res.json({ status: 'done', notification: result.notification, ...result.analysis });
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[/process] pipeline failed for ${url}:`, message);
+    res.status(500).json({ error: message });
+  }
 });
 
 // Shared pipeline for pre-fetched text (files, etc.)
@@ -276,7 +276,7 @@ interface ProcessFileBody {
   mime_type: string;
 }
 
-app.post('/process-file', processLimiter, (req: Request, res: Response) => {
+app.post('/process-file', processLimiter, async (req: Request, res: Response) => {
   const { buffer, filename, mime_type } = req.body as ProcessFileBody;
 
   if (!buffer || !filename || !mime_type) {
@@ -290,19 +290,17 @@ app.post('/process-file', processLimiter, (req: Request, res: Response) => {
     return;
   }
 
-  // waitUntil MUST be called before res.json
-  waitUntil(
-    (async () => {
-      console.log(`[INTAKE] 1. Extracting text from file: ${filename} (${sourceType})`);
-      const fileBuffer = Buffer.from(buffer, 'base64');
-      const rawText = await extractFileText(fileBuffer, sourceType as FileSourceType);
-      await rawTextPipeline(rawText, sourceType, `file:${filename}`, filename);
-    })().catch((err) => {
-      console.error(`[/process-file] pipeline failed for ${filename}:`, err instanceof Error ? err.message : err);
-    }),
-  );
-
-  res.json({ status: 'processing', filename });
+  try {
+    console.log(`[INTAKE] 1. Extracting text from file: ${filename} (${sourceType})`);
+    const fileBuffer = Buffer.from(buffer, 'base64');
+    const rawText = await extractFileText(fileBuffer, sourceType as FileSourceType);
+    await rawTextPipeline(rawText, sourceType, `file:${filename}`, filename);
+    res.json({ status: 'done', filename });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[/process-file] failed for ${filename}:`, message);
+    res.status(500).json({ error: message });
+  }
 });
 
 interface BatchBody {
