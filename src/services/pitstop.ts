@@ -23,6 +23,7 @@ export async function saveIngestedContent(
     return;
   }
 
+  console.log('[INTAKE] saving to ingested_content...', { sourceUrl, sourceType, contentHash });
   const { error } = await supabase.from('ingested_content').insert({
     source_url: sourceUrl,
     source_type: sourceType,
@@ -32,9 +33,9 @@ export async function saveIngestedContent(
   });
 
   if (error) {
-    console.error('[pitstop] ingested_content INSERT failed:', error.message);
+    console.error('[pitstop] ingested_content INSERT failed:', JSON.stringify(error));
   } else {
-    console.log(`[pitstop] ingested content saved: ${sourceUrl}`);
+    console.log('[pitstop] ingested_content saved OK:', sourceUrl);
   }
 }
 
@@ -70,12 +71,13 @@ export async function saveExtractedKnowledge(
     source_type: sourceType,
   }));
 
+  console.log('[INTAKE] saving to extracted_knowledge...', { count: rows.length, sourceUrl });
   const { error } = await supabase.from('extracted_knowledge').insert(rows);
 
   if (error) {
-    console.error('[pitstop] extracted_knowledge INSERT failed:', error.message);
+    console.error('[pitstop] extracted_knowledge INSERT failed:', JSON.stringify(error));
   } else {
-    console.log(`[pitstop] saved ${items.length} knowledge items`);
+    console.log(`[pitstop] extracted_knowledge saved OK: ${items.length} items`);
   }
 }
 
