@@ -34,6 +34,7 @@
     "groq-sdk": "^1.1.2",
     "html-to-text": "^9.0.5",
     "mammoth": "^1.12.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "youtube-caption-extractor": "^1.9.1"
   }
 }

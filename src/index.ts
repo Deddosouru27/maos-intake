@@ -3,8 +3,7 @@ import { createHash } from 'crypto';
 import express, { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
-import { downloadAudio } from './handlers/youtube';
-import { transcribeAudio } from './services/transcribe';
+import { fetchYouTubeText } from './handlers/youtube';
 import { analyzeContent } from './services/analyze';
 import { insertIngestedPending, updateIngestedDone, saveExtractedKnowledge, saveToPitstop } from './services/pitstop';
 import { fetchArticle } from './handlers/article';
@@ -91,9 +90,8 @@ async function fetchRawContent(
   source: Source,
 ): Promise<{ rawText: string; title?: string }> {
   if (source === 'youtube') {
-    const { audioPath } = await downloadAudio(url);
-    const transcription = await transcribeAudio(audioPath);
-    return { rawText: transcription.text };
+    const { title, text } = await fetchYouTubeText(url);
+    return { rawText: text, title };
   }
 
   if (source === 'thread') {

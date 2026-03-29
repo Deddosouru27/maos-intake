@@ -1,49 +1,38 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import ytdl from '@distube/ytdl-core';
-import { transcribeAudio } from '../services/transcribe';
+import { getVideoDetails } from 'youtube-caption-extractor';
 
-export interface YouTubeDownloadResult {
-  audioPath: string;
-  title: string;
-  duration: number;
+function extractVideoId(url: string): string | null {
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/,
+  ];
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
 }
 
-function isYouTubeUrl(url: string): boolean {
-  return url.includes('youtube.com') || url.includes('youtu.be');
-}
+export async function fetchYouTubeText(url: string): Promise<{ title: string; text: string }> {
+  const videoId = extractVideoId(url);
+  if (!videoId) throw new Error(`Cannot extract video ID from URL: ${url}`);
 
-export async function downloadAudio(url: string): Promise<YouTubeDownloadResult> {
-  if (!isYouTubeUrl(url)) {
-    throw new Error(`Not a YouTube URL: ${url}`);
+  // Try Russian first, then English
+  let details = await getVideoDetails({ videoID: videoId, lang: 'ru' });
+  if (!details.subtitles || details.subtitles.length === 0) {
+    details = await getVideoDetails({ videoID: videoId, lang: 'en' });
   }
 
-  const info = await ytdl.getInfo(url);
-  const title = info.videoDetails.title;
-  const duration = parseInt(info.videoDetails.lengthSeconds, 10);
-
-  if (duration > 1800) {
-    throw new Error(`Видео слишком длинное (>30 мин): ${Math.round(duration / 60)} мин`);
+  if (!details.subtitles || details.subtitles.length === 0) {
+    throw new Error('No captions available for this video');
   }
 
-  const audioPath = path.join('/tmp', `audio_${Date.now()}.mp4`);
-
-  await new Promise<void>((resolve, reject) => {
-    ytdl(url, { filter: 'audioonly', quality: 'lowestaudio' })
-      .pipe(fs.createWriteStream(audioPath))
-      .on('finish', resolve)
-      .on('error', reject);
-  });
-
-  return { audioPath, title, duration };
+  const text = details.subtitles.map((s: { text: string }) => s.text).join(' ');
+  return {
+    title: details.title || 'YouTube video',
+    text,
+  };
 }
 
-export async function handleYoutube(url: string): Promise<string> {
-  if (!isYouTubeUrl(url)) {
-    throw new Error(`Not a YouTube URL: ${url}`);
-  }
-
-  const { audioPath } = await downloadAudio(url);
-  const transcription = await transcribeAudio(audioPath);
-  return transcription.text;
-}
+// Legacy download+transcribe kept for future use (Railway deployment with Whisper)
+// export async function downloadAudio(url: string): Promise<YouTubeDownloadResult> { ... }
