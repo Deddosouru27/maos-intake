@@ -163,17 +163,24 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     const contentHash = computeHash(rawText);
     console.log('[INTAKE] 3. Dedup check, hash:', contentHash.slice(0, 8));
 
-    const context = await getFullContext();
+    let context;
+    try {
+      context = await getFullContext();
+    } catch (err) {
+      console.error('[INTAKE] getFullContext FAILED:', err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+    console.log('[INTAKE] 4. Context ok — projects:', context.projects.length, 'domains:', context.domains.length, 'recentHashes:', context.recentHashes.length);
+
     if (context.recentHashes.includes(contentHash)) {
-      console.log('[INTAKE] Duplicate content, skipping');
+      console.log('[INTAKE] Duplicate content hash:', contentHash.slice(0, 8), '— skipping');
       return { duplicate: true };
     }
-    console.log('[INTAKE] 4. Context ok — projects:', context.projects.length, 'domains:', context.domains.length);
 
     // Insert pending BEFORE Haiku — dedup works even if analysis fails
-    console.log('[INTAKE] 4.5. Saving ingested_content (pending)...');
+    console.log('[INTAKE] 4.5. Calling insertIngestedPending, source:', source, 'hash:', contentHash.slice(0, 8));
     const ingestedId = await insertIngestedPending(rawText, url, source, title, contentHash);
-    console.log('[INTAKE] ingested_content id:', ingestedId);
+    console.log('[INTAKE] 4.5. Done, ingestedId:', ingestedId);
 
     console.log('[INTAKE] 5. Haiku analysis (single call, no retry)...');
     const analysis = await analyzeContent(rawText, url);
