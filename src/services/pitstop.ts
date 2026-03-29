@@ -28,33 +28,47 @@ export async function saveIngestedContent(
 
   console.log('[INTAKE] Saving to ingested_content:', { url: sourceUrl, title, hash: contentHash });
 
-  const { data, error } = await supabase
-    .from('ingested_content')
-    .insert({
-      source_url: sourceUrl,
-      source_type: sourceType,
-      raw_text: rawText.slice(0, 50000),
-      title: title ?? null,
-      content_hash: contentHash,
-      summary: analysis.summary,
-      overall_immediate: analysis.overall_immediate,
-      overall_strategic: analysis.overall_strategic,
-      knowledge_count: analysis.knowledge_items.length,
-      routing_result: routingResult,
-      language: analysis.language,
-      word_count: rawText.split(/\s+/).filter(Boolean).length,
-      processing_status: 'done',
-    })
-    .select('id')
-    .single();
+  // INSERT and SELECT separated — anon key may allow INSERT but not SELECT
+  const { error: insertError } = await supabase.from('ingested_content').insert({
+    source_url: sourceUrl,
+    source_type: sourceType,
+    raw_text: rawText.slice(0, 50000),
+    title: title ?? null,
+    content_hash: contentHash,
+    summary: analysis.summary,
+    overall_immediate: analysis.overall_immediate,
+    overall_strategic: analysis.overall_strategic,
+    knowledge_count: analysis.knowledge_items.length,
+    routing_result: routingResult,
+    language: analysis.language,
+    word_count: rawText.split(/\s+/).filter(Boolean).length,
+    processing_status: 'done',
+  });
 
-  if (error) {
-    console.error('[INTAKE] ingested_content ERROR:', JSON.stringify(error));
+  if (insertError) {
+    console.error('[INTAKE] ingested_content INSERT ERROR:', insertError.message, '| code:', insertError.code, '| details:', insertError.details, '| hint:', insertError.hint);
     return null;
   }
 
-  console.log('[INTAKE] ingested_content saved:', (data as { id: string } | null)?.id);
-  return (data as { id: string } | null)?.id ?? null;
+  console.log('[INTAKE] ingested_content INSERT OK, fetching id...');
+
+  // Fetch id separately after insert
+  const { data: row, error: selectError } = await supabase
+    .from('ingested_content')
+    .select('id')
+    .eq('content_hash', contentHash)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (selectError) {
+    console.warn('[INTAKE] ingested_content SELECT id failed (row was saved):', selectError.message);
+    return null;
+  }
+
+  const id = (row as { id: string } | null)?.id ?? null;
+  console.log('[INTAKE] ingested_content saved OK, id:', id);
+  return id;
 }
 
 export async function saveExtractedKnowledge(
