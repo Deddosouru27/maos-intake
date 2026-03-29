@@ -34,6 +34,26 @@ function extractText($: cheerio.CheerioAPI): string {
   return paragraphs.join(' ').trim();
 }
 
+export async function fetchWithJina(url: string): Promise<{ text: string; title: string } | null> {
+  try {
+    const resp = await fetch('https://r.jina.ai/' + url, {
+      headers: { Accept: 'text/plain' },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!resp.ok) return null;
+    const text = await resp.text();
+    if (!text || text.length < 50) return null;
+    const titleMatch = text.match(/^Title:\s*(.+)/m);
+    return {
+      title: titleMatch?.[1]?.trim() || 'Article',
+      text: text.substring(0, 50000),
+    };
+  } catch {
+    console.log('[INTAKE] Jina failed, falling back to readability');
+    return null;
+  }
+}
+
 export async function fetchArticle(url: string): Promise<{ text: string; title: string }> {
   const response = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; maos-intake/1.0)' },

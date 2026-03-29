@@ -3,10 +3,10 @@ import { createHash } from 'crypto';
 import express, { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
-import { fetchYouTubeText } from './handlers/youtube';
+import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent } from './services/analyze';
 import { insertIngestedPending, updateIngestedDone, saveExtractedKnowledge, saveToPitstop } from './services/pitstop';
-import { fetchArticle } from './handlers/article';
+import { fetchArticle, fetchWithJina } from './handlers/article';
 import { getFullContext } from './services/projectContext';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, RoutedTo } from './types';
 
@@ -88,10 +88,15 @@ app.get('/health', (_req: Request, res: Response) => {
 async function fetchRawContent(
   url: string,
   source: Source,
-): Promise<{ rawText: string; title?: string }> {
+): Promise<{ rawText: string; title?: string; youtube_unavailable?: true }> {
   if (source === 'youtube') {
-    const { title, text } = await fetchYouTubeText(url);
-    return { rawText: text, title };
+    try {
+      const { title, text } = await fetchYouTubeText(url);
+      if (text && text.length > 50) return { rawText: text, title };
+    } catch (err) {
+      console.log('[INTAKE] YouTube fetch failed:', err instanceof Error ? err.message : String(err));
+    }
+    return { rawText: '', youtube_unavailable: true };
   }
 
   if (source === 'thread') {
@@ -104,6 +109,15 @@ async function fetchRawContent(
     return { rawText: '' };
   }
 
+  // Jina Reader first — handles paywalls and JS-heavy sites better
+  const jinaResult = await fetchWithJina(url);
+  if (jinaResult && jinaResult.text.length > 100) {
+    console.log('[INTAKE] Jina ok, length:', jinaResult.text.length);
+    return { rawText: jinaResult.text, title: jinaResult.title };
+  }
+
+  // Fallback to readability
+  console.log('[INTAKE] Using readability fallback');
   const { text, title } = await fetchArticle(url);
   return { rawText: text, title };
 }
@@ -145,7 +159,7 @@ async function runPipeline(
   return notification;
 }
 
-async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis } | { duplicate: true }> {
+async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis } | { duplicate: true } | { youtube_unavailable: true }> {
   // 45s hard timeout — Vercel maxDuration is 60s, leaves buffer for network
   const timeoutId = setTimeout(() => {
     throw new Error('[INTAKE] Pipeline timeout (45s)');
@@ -153,7 +167,13 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
 
   try {
     console.log('[INTAKE] 1. Fetching URL...');
-    const { rawText, title } = await fetchRawContent(url, source);
+    const fetched = await fetchRawContent(url, source);
+
+    if (fetched.youtube_unavailable) {
+      return { youtube_unavailable: true };
+    }
+
+    const { rawText, title } = fetched;
     console.log(`[INTAKE] 2. Fetched ${rawText.length} chars, title: ${title ?? 'none'}`);
 
     const contentHash = computeHash(rawText);
@@ -171,6 +191,25 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     if (context.recentHashes.includes(contentHash)) {
       console.log('[INTAKE] Duplicate content hash:', contentHash.slice(0, 8), '— skipping');
       return { duplicate: true };
+    }
+
+    // YouTube dedup by video ID (hash may differ due to caption format changes)
+    if (source === 'youtube') {
+      const videoId = extractVideoId(url);
+      if (videoId && context.recentHashes.length > 0) {
+        // recentHashes come from ingested_content — check source_url instead via supabase
+        const { createClient } = await import('@supabase/supabase-js');
+        const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+        const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+        if (pitstopUrl && pitstopKey) {
+          const sb = createClient(pitstopUrl, pitstopKey);
+          const { data } = await sb.from('ingested_content').select('id').ilike('source_url', `%${videoId}%`).limit(1);
+          if (data && data.length > 0) {
+            console.log('[INTAKE] Duplicate YouTube video ID:', videoId);
+            return { duplicate: true };
+          }
+        }
+      }
     }
 
     // Insert pending BEFORE Haiku — dedup works even if analysis fails
@@ -205,17 +244,14 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
     return;
   }
 
-  if (source === 'youtube') {
-    res.json({
-      status: 'youtube_unavailable',
-      notification: '🎬 YouTube пока не поддерживается. Скопируй транскрипт через youtubetotranscript.com и отправь текстом через /idea',
-    });
-    return;
-  }
-
   try {
     const result = await fullPipeline(url, source);
-    if ('duplicate' in result) {
+    if ('youtube_unavailable' in result) {
+      res.json({
+        status: 'youtube_unavailable',
+        notification: '🎬 YouTube временно недоступен на этом сервере. Скопируй транскрипт через youtubetotranscript.com и отправь текстом',
+      });
+    } else if ('duplicate' in result) {
       res.json({ status: 'duplicate', notification: '♻️ Этот контент уже обрабатывался' });
     } else {
       res.json({ status: 'done', notification: result.notification, ...result.analysis });
