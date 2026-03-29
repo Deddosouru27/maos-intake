@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { createHash } from 'crypto';
 import express, { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
+import { waitUntil } from '@vercel/functions';
 import { downloadAudio } from './handlers/youtube';
 import { transcribeAudio } from './services/transcribe';
 import { analyzeContent } from './services/analyze';
@@ -151,7 +152,33 @@ async function runPipeline(
   return notification;
 }
 
-app.post('/process', processLimiter, async (req: Request, res: Response) => {
+// Full async pipeline — runs via waitUntil after response is sent
+async function fullPipeline(url: string, source: Source): Promise<void> {
+  console.log('[INTAKE] 1. Fetching URL...');
+  const { rawText, title } = await fetchRawContent(url, source);
+
+  console.log('[INTAKE] 2. Parsing content...');
+  const contentHash = computeHash(rawText);
+
+  console.log('[INTAKE] 3. Dedup check...');
+  const context = await getFullContext();
+  if (context.recentHashes.includes(contentHash)) {
+    console.log('[INTAKE] Duplicate content, skipping');
+    return;
+  }
+
+  console.log('[INTAKE] 4. Context assembly done (cached or freshly loaded)');
+
+  console.log('[INTAKE] 5. Haiku analysis...');
+  const analysis = await analyzeWithRetry(rawText, url);
+
+  console.log('[INTAKE] 6. Routing...');
+  const notification = await runPipeline(rawText, analysis, url, source, contentHash, title);
+
+  console.log(`[INTAKE] 7. Done — ${notification}`);
+}
+
+app.post('/process', processLimiter, (req: Request, res: Response) => {
   const { url, source: providedSource } = req.body as ProcessBody;
 
   if (!url) {
@@ -161,51 +188,22 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
 
   const source = detectSource(url, providedSource);
 
-  try {
-    // Instagram stub — no fetch needed
-    if (source === 'instagram') {
-      res.json({
-        summary: 'Instagram не поддерживается',
-        knowledge_items: [],
-        overall_immediate: 0,
-        overall_strategic: 0,
-        priority_signal: false,
-        priority_reason: '',
-        category: 'other',
-        language: 'other',
-        notification: '📭 Instagram не поддерживается',
-      });
-      return;
-    }
-
-    // Phase 1: fetch
-    const { rawText, title } = await fetchRawContent(url, source);
-    const contentHash = computeHash(rawText);
-
-    // Dedup check — skip analysis if content already processed
-    const context = await getFullContext();
-    if (context.recentHashes.includes(contentHash)) {
-      console.log('[process] duplicate content, skipping analysis');
-      res.json({ duplicate: true, notification: '♻️ Этот контент уже обрабатывался' });
-      return;
-    }
-
-    // Phase 2: analyze
-    const analysis = await analyzeWithRetry(rawText, url);
-    console.log('Analysis result:', JSON.stringify(analysis, null, 2));
-
-    // Respond immediately
-    res.json(analysis);
-
-    // Phase 3: persist in background
-    runPipeline(rawText, analysis, url, source, contentHash, title)
-      .then((notification) => console.log(`[process] ${notification}`))
-      .catch(console.error);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[/process] error for ${url}:`, message);
-    res.status(500).json({ error: message });
+  if (source === 'instagram') {
+    res.json({
+      status: 'unsupported',
+      notification: '📭 Instagram не поддерживается',
+    });
+    return;
   }
+
+  // Respond immediately — pipeline continues via waitUntil
+  res.json({ status: 'processing', url });
+
+  waitUntil(
+    fullPipeline(url, source).catch((err) => {
+      console.error(`[/process] pipeline failed for ${url}:`, err instanceof Error ? err.message : err);
+    }),
+  );
 });
 
 interface BatchBody {
