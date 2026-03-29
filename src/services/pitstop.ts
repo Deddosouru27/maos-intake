@@ -34,15 +34,14 @@ export async function insertIngestedPending(
     processing_status: 'processing',
   };
 
-  console.log('[INTAKE] IC INSERT data:', JSON.stringify({
+  const payload = {
     source_url: insertData.source_url,
-    source_type: typeof insertData.source_type + ':' + insertData.source_type,
-    title: insertData.title?.substring(0, 30),
+    source_type: String(insertData.source_type),
+    title: insertData.title?.substring(0, 30) ?? null,
     content_hash: insertData.content_hash,
     processing_status: insertData.processing_status,
-    has_raw_text: !!insertData.raw_text,
-    word_count: insertData.word_count,
-  }));
+  };
+  console.log('[INTAKE] IC payload:', JSON.stringify(payload));
 
   let insertError;
   try {
@@ -52,15 +51,17 @@ export async function insertIngestedPending(
     return null;
   }
 
-  console.log('[INTAKE] IC INSERT result:', JSON.stringify({
-    error: insertError?.message,
-    code: insertError?.code,
-    details: insertError?.details,
-  }));
-
   if (insertError) {
+    console.error('[INTAKE] IC INSERT FAIL:', JSON.stringify({
+      message: insertError.message,
+      code: insertError.code,
+      details: insertError.details,
+      hint: insertError.hint,
+    }));
     return null;
   }
+
+  console.log('[INTAKE] IC INSERT OK');
 
   const { data: row, error: selectError } = await supabase
     .from('ingested_content')
