@@ -232,14 +232,14 @@ app.post('/process', processLimiter, (req: Request, res: Response) => {
     return;
   }
 
-  // Respond immediately — pipeline continues via waitUntil
-  res.json({ status: 'processing', url });
-
+  // waitUntil MUST be called before res.json — otherwise Vercel kills the process
   waitUntil(
     fullPipeline(url, source).catch((err) => {
       console.error(`[/process] pipeline failed for ${url}:`, err instanceof Error ? err.message : err);
     }),
   );
+
+  res.json({ status: 'processing', url });
 });
 
 // Shared pipeline for pre-fetched text (files, etc.)
@@ -290,8 +290,7 @@ app.post('/process-file', processLimiter, (req: Request, res: Response) => {
     return;
   }
 
-  res.json({ status: 'processing', filename });
-
+  // waitUntil MUST be called before res.json
   waitUntil(
     (async () => {
       console.log(`[INTAKE] 1. Extracting text from file: ${filename} (${sourceType})`);
@@ -302,6 +301,8 @@ app.post('/process-file', processLimiter, (req: Request, res: Response) => {
       console.error(`[/process-file] pipeline failed for ${filename}:`, err instanceof Error ? err.message : err);
     }),
   );
+
+  res.json({ status: 'processing', filename });
 });
 
 interface BatchBody {
