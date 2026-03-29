@@ -26,12 +26,9 @@ export async function saveIngestedContent(
     return null;
   }
 
-  console.log('[INTAKE] Saving to ingested_content:', { url: sourceUrl, title, hash: contentHash });
-
-  // INSERT and SELECT separated — anon key may allow INSERT but not SELECT
-  const { error: insertError } = await supabase.from('ingested_content').insert({
+  const insertData = {
     source_url: sourceUrl,
-    source_type: sourceType,
+    source_type: sourceType || 'article',   // NOT NULL — never let this be empty
     raw_text: rawText.slice(0, 50000),
     title: title ?? null,
     content_hash: contentHash,
@@ -43,10 +40,20 @@ export async function saveIngestedContent(
     language: analysis.language,
     word_count: rawText.split(/\s+/).filter(Boolean).length,
     processing_status: 'done',
-  });
+  };
+
+  console.log('[INTAKE] ingested_content data:', JSON.stringify(insertData));
+
+  let insertError;
+  try {
+    ({ error: insertError } = await supabase.from('ingested_content').insert(insertData));
+  } catch (err) {
+    console.error('[INTAKE] IC ERROR (exception):', err instanceof Error ? err.message : String(err));
+    return null;
+  }
 
   if (insertError) {
-    console.error('[INTAKE] ingested_content INSERT ERROR:', insertError.message, '| code:', insertError.code, '| details:', insertError.details, '| hint:', insertError.hint);
+    console.error('[INTAKE] IC ERROR:', JSON.stringify(insertError));
     return null;
   }
 
