@@ -127,14 +127,14 @@ async function fetchRawContent(
     return { rawText: thread.text || url };
   }
 
-  if (source === 'instagram') {
-    console.log('[INTAKE] Instagram detected, trying Apify...');
+  if (source === 'instagram' || url.includes('instagram.com')) {
+    console.log('[INTAKE] Instagram URL detected, calling Apify...');
     const apifyResult = await fetchInstagramTranscript(url);
-    if (apifyResult && apifyResult.text.length > 20) {
-      console.log('[INTAKE] Apify Instagram OK:', apifyResult.text.length, 'chars');
+    if (apifyResult) {
+      console.log('[INTAKE] Apify returned:', apifyResult.text.length, 'chars');
       return { rawText: apifyResult.text, title: apifyResult.title };
     }
-    console.log('[INTAKE] Apify Instagram failed, falling back to Jina');
+    console.log('[INTAKE] Apify failed, falling back to Jina');
     const jinaResult = await fetchWithJina(url);
     if (jinaResult && jinaResult.text.length > 100) {
       return { rawText: jinaResult.text, title: jinaResult.title };
@@ -398,20 +398,6 @@ app.post('/batch', processLimiter, async (req: Request, res: Response) => {
   for (const url of urls) {
     const source = detectSource(url);
     try {
-      if (source === 'instagram') {
-        results.push({
-          summary: 'Instagram не поддерживается',
-          knowledge_items: [],
-          overall_immediate: 0,
-          overall_strategic: 0,
-          priority_signal: false,
-          priority_reason: '',
-          category: 'other',
-          language: 'other',
-        });
-        continue;
-      }
-
       const { rawText, title } = await fetchRawContent(url, source);
       const contentHash = computeHash(rawText);
 
