@@ -1,109 +1,179 @@
-export async function fetchInstagramTranscript(url: string): Promise<{ title: string; text: string; sourceType: string } | null> {
-  const apifyToken = process.env.APIFY_API_TOKEN;
+// Нативный fetch, никаких SDK, максимум логов
+
+const APIFY_BASE = 'https://api.apify.com/v2';
+
+export async function fetchInstagramTranscript(
+  url: string,
+): Promise<{ title: string; text: string; sourceType: string } | null> {
+  const token = process.env.APIFY_API_TOKEN;
   const groqKey = process.env.GROQ_API_KEY;
-  if (!apifyToken) { console.log('[APIFY] TOKEN MISSING'); return null; }
+
+  console.log('[APIFY] === Instagram pipeline START ===');
+  console.log('[APIFY] URL:', url);
+  console.log('[APIFY] APIFY_API_TOKEN:', token ? `SET (${token.substring(0, 12)}...)` : 'MISSING');
+  console.log('[APIFY] GROQ_API_KEY:', groqKey ? 'SET' : 'MISSING');
+
+  if (!token) {
+    console.log('[APIFY] ABORT: no token');
+    return null;
+  }
 
   try {
-    console.log('[APIFY] Starting for:', url);
-
-    // Step 1: Start actor via HTTP API
+    // Step 1: Start actor
+    console.log('[APIFY] Step 1: Starting actor apify/instagram-reel-scraper...');
     const startResp = await fetch(
-      `https://api.apify.com/v2/acts/apify~instagram-reel-scraper/runs?token=${apifyToken}`,
+      `${APIFY_BASE}/acts/apify~instagram-reel-scraper/runs?token=${token}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ directUrls: [url], resultsLimit: 1 }),
-        signal: AbortSignal.timeout(45000),
+        signal: AbortSignal.timeout(15000),
       },
     );
 
+    console.log('[APIFY] Actor start response:', startResp.status, startResp.statusText);
+
     if (!startResp.ok) {
-      console.log('[APIFY] Start failed:', startResp.status, await startResp.text().catch(() => ''));
+      const errText = await startResp.text();
+      console.log('[APIFY] Actor start FAILED:', errText.substring(0, 500));
       return null;
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const runData = await startResp.json() as any;
-    const runId = runData.data?.id;
-    const datasetId = runData.data?.defaultDatasetId;
-    console.log('[APIFY] Run started:', runId, 'dataset:', datasetId);
+    const runData = (await startResp.json()) as any;
+    const runId = runData?.data?.id;
+    const datasetId = runData?.data?.defaultDatasetId;
+    console.log('[APIFY] Run ID:', runId);
+    console.log('[APIFY] Run status:', runData?.data?.status);
 
-    // Step 2: Poll for completion (every 3s, max 40s)
-    let status = runData.data?.status;
+    if (!runId) {
+      console.log('[APIFY] No run ID returned');
+      return null;
+    }
+
+    // Step 2: Poll for completion (every 3s, max 39s)
+    console.log('[APIFY] Step 2: Polling for completion...');
+    let status = runData?.data?.status;
     let attempts = 0;
-    while (status !== 'SUCCEEDED' && status !== 'FAILED' && attempts < 13) {
+    const maxAttempts = 13;
+
+    while (status !== 'SUCCEEDED' && status !== 'FAILED' && status !== 'ABORTED' && attempts < maxAttempts) {
       await new Promise((r) => setTimeout(r, 3000));
-      const pollResp = await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${apifyToken}`);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const pollData = await pollResp.json() as any;
-      status = pollData.data?.status;
       attempts++;
-      console.log('[APIFY] Poll:', status, 'attempt:', attempts);
+      const pollResp = await fetch(`${APIFY_BASE}/actor-runs/${runId}?token=${token}`, {
+        signal: AbortSignal.timeout(10000),
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pollData = (await pollResp.json()) as any;
+      status = pollData?.data?.status;
+      console.log(`[APIFY] Poll ${attempts}/${maxAttempts}: ${status}`);
     }
 
     if (status !== 'SUCCEEDED') {
-      console.log('[APIFY] Run failed/timeout:', status);
+      console.log('[APIFY] Run did not succeed:', status);
       return null;
     }
 
-    // Step 3: Fetch results
-    const itemsResp = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${apifyToken}`);
+    // Step 3: Fetch dataset results
+    console.log('[APIFY] Step 3: Fetching dataset:', datasetId);
+    const dsResp = await fetch(`${APIFY_BASE}/datasets/${datasetId}/items?token=${token}`, {
+      signal: AbortSignal.timeout(10000),
+    });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const items = await itemsResp.json() as any[];
-    console.log('[APIFY] Items:', items.length);
+    const items = (await dsResp.json()) as any[];
+    console.log('[APIFY] Dataset items:', items?.length || 0);
 
-    if (!items.length) return null;
+    if (!items || items.length === 0) {
+      console.log('[APIFY] No items in dataset');
+      return null;
+    }
+
     const reel = items[0];
-
     const videoUrl = reel.videoUrl || reel.displayUrl;
     const caption = reel.caption || '';
     const owner = reel.ownerUsername || 'unknown';
-    console.log('[APIFY] videoUrl:', videoUrl ? 'YES' : 'none', 'caption:', caption.length);
 
-    // Step 4: Whisper transcription
+    console.log('[APIFY] videoUrl:', videoUrl ? videoUrl.substring(0, 80) + '...' : 'none');
+    console.log('[APIFY] caption:', caption.length, 'chars');
+    console.log('[APIFY] owner:', owner);
+
+    // Step 4: Download video + Groq Whisper
     if (videoUrl && groqKey) {
       try {
-        console.log('[APIFY] Downloading video...');
-        const vResp = await fetch(videoUrl, { signal: AbortSignal.timeout(15000) });
-        const buf = Buffer.from(await vResp.arrayBuffer());
-        console.log('[APIFY] Video:', buf.length, 'bytes');
+        console.log('[APIFY] Step 4: Downloading video...');
+        const vidResp = await fetch(videoUrl, { signal: AbortSignal.timeout(15000) });
 
-        if (buf.length > 100 && buf.length < 25_000_000) {
-          const FormData = (await import('form-data')).default;
-          const fd = new FormData();
-          fd.append('file', buf, { filename: 'r.mp4', contentType: 'video/mp4' });
-          fd.append('model', 'whisper-large-v3');
+        if (!vidResp.ok) {
+          console.log('[APIFY] Video download failed:', vidResp.status);
+        } else {
+          const buffer = Buffer.from(await vidResp.arrayBuffer());
+          console.log('[APIFY] Video size:', buffer.length, 'bytes');
 
-          const wResp = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-            method: 'POST',
-            headers: { Authorization: 'Bearer ' + groqKey, ...fd.getHeaders() },
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            body: fd as any,
-            signal: AbortSignal.timeout(30000),
-          });
+          if (buffer.length > 100 && buffer.length < 25_000_000) {
+            console.log('[APIFY] Step 5: Calling Groq Whisper...');
 
-          if (wResp.ok) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const r = await wResp.json() as any;
-            console.log('[APIFY] Whisper:', r.text?.length || 0, 'chars');
-            if (r.text && r.text.length > 20) {
-              return { title: 'Instagram @' + owner + ' (audio)', text: r.text, sourceType: 'instagram' };
+            // Build multipart form-data manually (no form-data package needed)
+            const boundary = '----FormBoundary' + Math.random().toString(36).substring(2);
+            const parts: Buffer[] = [];
+
+            parts.push(Buffer.from(
+              `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="reel.mp4"\r\nContent-Type: video/mp4\r\n\r\n`,
+            ));
+            parts.push(buffer);
+            parts.push(Buffer.from('\r\n'));
+            parts.push(Buffer.from(
+              `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-large-v3\r\n`,
+            ));
+            parts.push(Buffer.from(`--${boundary}--\r\n`));
+
+            const body = Buffer.concat(parts);
+
+            const whisperResp = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+              method: 'POST',
+              headers: {
+                Authorization: 'Bearer ' + groqKey,
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+              },
+              body,
+              signal: AbortSignal.timeout(30000),
+            });
+
+            console.log('[APIFY] Whisper response:', whisperResp.status);
+
+            if (whisperResp.ok) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const result = (await whisperResp.json()) as any;
+              console.log('[APIFY] Transcript length:', result.text?.length || 0, 'chars');
+
+              if (result.text && result.text.length > 20) {
+                console.log('[APIFY] === SUCCESS: Audio transcript ===');
+                return {
+                  title: `Instagram @${owner} (audio)`,
+                  text: result.text,
+                  sourceType: 'instagram',
+                };
+              }
+            } else {
+              const errText = await whisperResp.text();
+              console.log('[APIFY] Whisper error:', errText.substring(0, 300));
             }
-          } else {
-            console.log('[APIFY] Whisper fail:', wResp.status);
           }
         }
       } catch (e) {
-        console.log('[APIFY] Video err:', e instanceof Error ? e.message : String(e));
+        console.log('[APIFY] Video/Whisper error:', e instanceof Error ? e.message : String(e));
       }
     }
 
+    // Fallback: caption
     if (caption.length > 50) {
-      return { title: 'Instagram @' + owner, text: caption, sourceType: 'instagram' };
+      console.log('[APIFY] === FALLBACK: caption ===');
+      return { title: `Instagram @${owner}`, text: caption, sourceType: 'instagram' };
     }
+
+    console.log('[APIFY] === FAIL: no useful content ===');
     return null;
   } catch (e) {
-    console.log('[APIFY] Error:', e instanceof Error ? e.message : String(e));
+    console.log('[APIFY] === FATAL ERROR ===', e instanceof Error ? e.message : String(e));
     return null;
   }
 }
