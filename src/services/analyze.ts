@@ -5,9 +5,11 @@ import { getFullContext, buildContextString } from './projectContext';
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const SYSTEM_PROMPT = `You are a knowledge extraction engine. Extract insights from content.
+ALWAYS respond in Russian. All content, business_value, and summary must be in Russian language.
 RULES:
 Extract 8-12 insights. More is better than fewer.
 IGNORE: ads, sponsors, promotions, self-promotion, affiliate links, off-topic tangents.
+IGNORE: product placements, affiliate promotions, unrelated tangents. Only extract insights about the main topic.
 Each insight must be actionable or strategically valuable.
 Be CONCISE. Maximum 2 sentences per insight.
 business_value: 1 sentence only.
