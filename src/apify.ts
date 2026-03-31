@@ -12,10 +12,12 @@ export async function fetchInstagramTranscript(url: string): Promise<{ title: st
     const client = new ApifyClient({ token: apifyToken });
 
     // Step 1: Get reel metadata quickly (includes videoUrl)
+    console.log('[APIFY] Calling actor with token:', apifyToken?.slice(0, 10) + '...');
     const run = await client.actor('apify/instagram-reel-scraper').call(
       { directUrls: [url], resultsLimit: 1 },
       { timeout: 45 },
     );
+    console.log('[APIFY] Actor run completed, datasetId:', run.defaultDatasetId);
 
     const { items } = await client.dataset(run.defaultDatasetId).listItems();
     console.log('[APIFY] Items:', items.length);
@@ -81,7 +83,8 @@ export async function fetchInstagramTranscript(url: string): Promise<{ title: st
 
     return null;
   } catch (e) {
-    console.log('[APIFY] Error:', e instanceof Error ? e.message : String(e));
+    const err = e instanceof Error ? e : new Error(String(e));
+    console.log('[APIFY] Error:', err.message, err.stack?.slice(0, 300));
     return null;
   }
 }
