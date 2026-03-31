@@ -7,6 +7,7 @@ import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent } from './services/analyze';
 import { insertIngestedPending, updateIngestedDone, saveExtractedKnowledge, saveToPitstop } from './services/pitstop';
 import { fetchArticle, fetchWithJina } from './handlers/article';
+import { fetchInstagramTranscript } from './apify';
 import { getFullContext } from './services/projectContext';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, RoutedTo } from './types';
 
@@ -127,6 +128,17 @@ async function fetchRawContent(
   }
 
   if (source === 'instagram') {
+    console.log('[INTAKE] Instagram detected, trying Apify...');
+    const apifyResult = await fetchInstagramTranscript(url);
+    if (apifyResult && apifyResult.text.length > 20) {
+      console.log('[INTAKE] Apify Instagram OK:', apifyResult.text.length, 'chars');
+      return { rawText: apifyResult.text, title: apifyResult.title };
+    }
+    console.log('[INTAKE] Apify Instagram failed, falling back to Jina');
+    const jinaResult = await fetchWithJina(url);
+    if (jinaResult && jinaResult.text.length > 100) {
+      return { rawText: jinaResult.text, title: jinaResult.title };
+    }
     return { rawText: '' };
   }
 
@@ -285,11 +297,6 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
   }
 
   const source = detectSource(url, providedSource);
-
-  if (source === 'instagram') {
-    res.json({ status: 'unsupported', notification: '📭 Instagram не поддерживается' });
-    return;
-  }
 
   try {
     const result = await fullPipeline(url, source);
