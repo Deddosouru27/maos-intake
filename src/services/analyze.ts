@@ -48,44 +48,35 @@ async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promi
   }
 }
 
-function repairControlChars(s: string): string {
-  return s.replace(/[\x00-\x1F\x7F]/g, (ch) => {
-    if (ch === '\n') return '\\n';
-    if (ch === '\r') return '\\r';
-    if (ch === '\t') return '\\t';
-    return '';
-  });
-}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseHaikuJSON(raw: string): any {
+  let text = raw.trim();
 
-function parseHaikuJSON<T>(text: string): T {
-  let cleaned = text.trim();
-  if (cleaned.startsWith('```json')) cleaned = cleaned.slice(7);
-  if (cleaned.startsWith('```')) cleaned = cleaned.slice(3);
-  if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
-  cleaned = cleaned.trim();
-  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    throw new Error('No JSON found in: ' + text.substring(0, 200));
-  }
-  const candidate = repairControlChars(jsonMatch[0]);
+  // 1. Strip markdown fences
+  text = text.replace(/^```(?:json)?\s*/i, '');
+  text = text.replace(/\s*```\s*$/i, '');
+  text = text.trim();
+
+  // 2. Remove control chars EXCEPT \n (0x0A), \r (0x0D), \t (0x09) — preserve JSON structural whitespace
+  text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+
+  // 3. Try direct parse
   try {
-    return JSON.parse(candidate) as T;
+    return JSON.parse(text);
   } catch {
-    // JSON truncated — try to repair closing brackets
-    let fixed = candidate;
-    fixed = fixed.replace(/,\s*$/, '');
-    const opens = (fixed.match(/\[/g) || []).length - (fixed.match(/\]/g) || []).length;
-    const braces = (fixed.match(/\{/g) || []).length - (fixed.match(/\}/g) || []).length;
-    if (opens > 0) fixed += ']'.repeat(opens);
-    if (braces > 0) fixed += '}'.repeat(braces);
-    fixed = fixed.replace(/,\s*([}\]])/g, '$1');
-    try {
-      return JSON.parse(fixed) as T;
-    } catch (e2) {
-      const msg = e2 instanceof Error ? e2.message : String(e2);
-      console.error('[INTAKE] JSON parse final fail:', msg, 'raw last 100:', text.slice(-100));
-      throw new Error('JSON parse failed after repair: ' + msg);
+    // 4. Extract outermost {...} and try again
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch (e2) {
+        const msg = e2 instanceof Error ? e2.message : String(e2);
+        console.error('[HAIKU] Parse failed after extraction:', msg);
+        console.error('[HAIKU] First 200 chars:', text.slice(0, 200));
+      }
     }
+    return { items: [], summary: '', category: 'parse_error' };
   }
 }
 
@@ -244,13 +235,14 @@ Extract 8-12 insights as JSON. Remember: CONCISE, no ads, only actionable insigh
   const raw = message.content[0].type === 'text' ? message.content[0].text : '';
   console.log('[HAIKU] Raw response first 200 chars:', raw.slice(0, 200));
 
-  let compact: CompactResponse;
-  try {
-    compact = parseHaikuJSON<CompactResponse>(raw);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error('[HAIKU] JSON parse failed:', msg);
-    console.error('[HAIKU] Attempted to parse (first 300):', raw.slice(0, 300));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const compact = parseHaikuJSON(raw) as any;
+
+  console.log('[ANALYZE] Parsed result keys:', Object.keys(compact));
+  console.log('[ANALYZE] Items count:', compact?.items?.length ?? 0);
+
+  if (compact?.category === 'parse_error' || !Array.isArray(compact?.items)) {
+    console.error('[HAIKU] JSON parse failed, raw (first 300):', raw.slice(0, 300));
     return {
       summary: 'JSON parse failed',
       knowledge_items: [],
@@ -264,10 +256,9 @@ Extract 8-12 insights as JSON. Remember: CONCISE, no ads, only actionable insigh
     };
   }
 
-  console.log('[ANALYZE] Parsed result keys:', Object.keys(compact));
-  console.log('[ANALYZE] Items count:', compact?.items?.length ?? 0);
+  const compactTyped = compact as CompactResponse;
 
-  const analysis = expandCompactResponse(compact);
+  const analysis = expandCompactResponse(compactTyped);
 
   if (analysis.priority_signal) {
     await sendTelegramAlert(source, analysis);
