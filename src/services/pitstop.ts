@@ -104,6 +104,7 @@ export async function updateIngestedDone(
   analysis: BrainAnalysis,
   routingResult: string,
   savedCount?: number,
+  isGuide?: boolean,
 ): Promise<void> {
   let supabase;
   try {
@@ -124,6 +125,7 @@ export async function updateIngestedDone(
       routing_result: routingResult,
       language: analysis.language,
       haiku_raw_response: analysis,
+      is_guide: isGuide ?? false,
     })
     .eq('id', id);
 

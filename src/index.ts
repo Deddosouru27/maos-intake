@@ -6,6 +6,7 @@ import { extractFileText, detectFileSource, FileSourceType } from './handlers/fi
 import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent, analyzeWithChunking } from './services/analyze';
 import { insertIngestedPending, updateIngestedDone, saveExtractedKnowledge, saveToPitstop } from './services/pitstop';
+import { rerankItems } from './services/rerank';
 import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
 import { getFullContext } from './services/projectContext';
@@ -166,7 +167,15 @@ async function runPipeline(
   sourceType: string,
   contentHash: string,
 ): Promise<string> {
-  const routed = routeItems(analysis.knowledge_items);
+  // Guide detection
+  const guidePattern = /guide|tutorial|step-by-step|how to|гайд|инструкция/i;
+  const isGuide = guidePattern.test(analysis.summary);
+  if (isGuide) console.log('[PIPELINE] Guide content detected');
+
+  // Rerank if > 5 items (requires COHERE_API_KEY)
+  const rankedItems = await rerankItems(analysis.summary, analysis.knowledge_items);
+
+  const routed = routeItems(rankedItems);
   const hotItems = routed.filter((i) => i.routed_to === 'hot_backlog');
   const strategicItems = routed.filter((i) => i.routed_to === 'knowledge_base');
   const discarded = routed.filter((i) => i.routed_to === 'discarded');
@@ -177,11 +186,30 @@ async function runPipeline(
 
   // Filter discarded items — don't pollute extracted_knowledge with noise
   const itemsToSave = routed.filter((i) => i.strategic_relevance >= 0.3 || i.immediate_relevance >= 0.3);
+
+  // Prepend [GUIDE] summary item for guide content
+  if (isGuide) {
+    itemsToSave.unshift({
+      content: '[GUIDE] ' + analysis.summary,
+      knowledge_type: 'guide',
+      project: null,
+      domains: [],
+      solves_need: null,
+      immediate_relevance: 0.8,
+      strategic_relevance: 0.8,
+      novelty: 0.5,
+      effort: 'medium',
+      has_ready_code: false,
+      business_value: null,
+      tags: ['guide'],
+      routed_to: 'knowledge_base',
+    });
+  }
   console.log(`[PIPELINE] items to save: ${itemsToSave.length}/${routed.length} (discarded noise: ${routed.length - itemsToSave.length})`);
 
   // Update ingested_content with analysis results (use post-filter count)
   if (ingestedId) {
-    await updateIngestedDone(ingestedId, analysis, routingResult, itemsToSave.length);
+    await updateIngestedDone(ingestedId, analysis, routingResult, itemsToSave.length, isGuide);
   }
 
   // Save extracted_knowledge first to get IDs, then link ideas

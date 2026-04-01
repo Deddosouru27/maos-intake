@@ -29,6 +29,7 @@
     "@types/html-to-text": "^9.0.4",
     "apify-client": "^2.22.3",
     "cheerio": "^1.2.0",
+    "cohere-ai": "^8.0.0",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "express-rate-limit": "^8.3.1",

@@ -22,7 +22,8 @@ export type KnowledgeType =
   | 'technique'
   | 'case_study'
   | 'strategic_idea'
-  | 'lesson_learned';
+  | 'lesson_learned'
+  | 'guide';
 
 export type EffortLevel = 'trivial' | 'low' | 'medium' | 'high' | 'huge';
 export type RoutedTo = 'hot_backlog' | 'knowledge_base' | 'discarded';
