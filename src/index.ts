@@ -250,6 +250,7 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
         .from('ingested_content')
         .select('id')
         .eq('source_url', url)
+        .eq('processing_status', 'done')
         .gte('created_at', new Date(Date.now() - 10 * 60 * 1000).toISOString())
         .limit(1);
       if (recent && recent.length > 0) {
