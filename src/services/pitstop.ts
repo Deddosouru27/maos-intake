@@ -86,6 +86,7 @@ export async function updateIngestedDone(
   id: string,
   analysis: BrainAnalysis,
   routingResult: string,
+  savedCount?: number,
 ): Promise<void> {
   let supabase;
   try {
@@ -102,7 +103,7 @@ export async function updateIngestedDone(
       summary: analysis.summary,
       overall_immediate: analysis.overall_immediate,
       overall_strategic: analysis.overall_strategic,
-      knowledge_count: analysis.knowledge_items.length,
+      knowledge_count: savedCount ?? analysis.knowledge_items.length,
       routing_result: routingResult,
       language: analysis.language,
       haiku_raw_response: analysis,

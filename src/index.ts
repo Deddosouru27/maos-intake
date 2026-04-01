@@ -172,14 +172,14 @@ async function runPipeline(
 
   console.log(`[PIPELINE] routing: ${routingResult}, hash: ${contentHash.slice(0, 8)}`);
 
-  // Update ingested_content with analysis results
-  if (ingestedId) {
-    await updateIngestedDone(ingestedId, analysis, routingResult);
-  }
-
   // Filter discarded items — don't pollute extracted_knowledge with noise
   const itemsToSave = routed.filter((i) => i.strategic_relevance >= 0.3 || i.immediate_relevance >= 0.3);
   console.log(`[PIPELINE] items to save: ${itemsToSave.length}/${routed.length} (discarded noise: ${routed.length - itemsToSave.length})`);
+
+  // Update ingested_content with analysis results (use post-filter count)
+  if (ingestedId) {
+    await updateIngestedDone(ingestedId, analysis, routingResult, itemsToSave.length);
+  }
 
   // Save in parallel
   console.log('[PIPELINE] saving extracted_knowledge / ideas...');
