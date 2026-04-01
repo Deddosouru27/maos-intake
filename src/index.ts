@@ -578,6 +578,68 @@ app.post('/summarize', async (req: Request, res: Response) => {
   }
 });
 
+app.post('/backfill-embeddings', async (_req: Request, res: Response) => {
+  const { createClient } = await import('@supabase/supabase-js');
+  const OpenAI = (await import('openai')).default;
+
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
+
+  if (!pitstopUrl || !pitstopKey || !openaiKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const supabase = createClient(pitstopUrl, pitstopKey);
+  const openai = new OpenAI({ apiKey: openaiKey });
+
+  const { data: rows, error } = await supabase
+    .from('extracted_knowledge')
+    .select('id, content')
+    .is('embedding', null)
+    .limit(50);
+
+  if (error) {
+    res.status(500).json({ error: error.message });
+    return;
+  }
+
+  if (!rows || rows.length === 0) {
+    const { count } = await supabase
+      .from('extracted_knowledge')
+      .select('*', { count: 'exact', head: true })
+      .is('embedding', null);
+    res.json({ processed: 0, remaining: count ?? 0 });
+    return;
+  }
+
+  let processed = 0;
+  for (const row of rows as { id: string; content: string }[]) {
+    try {
+      const resp = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: row.content.slice(0, 8000),
+        dimensions: 512,
+      });
+      const { error: upErr } = await supabase
+        .from('extracted_knowledge')
+        .update({ embedding: resp.data[0].embedding })
+        .eq('id', row.id);
+      if (!upErr) processed++;
+    } catch (e) {
+      console.error('[backfill] row', row.id, e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  const { count: remaining } = await supabase
+    .from('extracted_knowledge')
+    .select('*', { count: 'exact', head: true })
+    .is('embedding', null);
+
+  res.json({ processed, remaining: remaining ?? 0 });
+});
+
 // Local dev only — Vercel handles listening in serverless
 if (process.env.VERCEL !== '1') {
   app.listen(PORT, () => {
