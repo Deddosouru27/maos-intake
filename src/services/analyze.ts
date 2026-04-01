@@ -48,16 +48,27 @@ async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promi
   }
 }
 
+function repairControlChars(s: string): string {
+  return s.replace(/[\x00-\x1F\x7F]/g, (ch) => {
+    if (ch === '\n') return '\\n';
+    if (ch === '\r') return '\\r';
+    if (ch === '\t') return '\\t';
+    return '';
+  });
+}
+
 function parseHaikuJSON<T>(text: string): T {
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  const cleaned = text.replace(/```json\s*/g, '').replace(/```/g, '').trim();
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
     throw new Error('No JSON found in: ' + text.substring(0, 200));
   }
+  const candidate = repairControlChars(jsonMatch[0]);
   try {
-    return JSON.parse(jsonMatch[0]) as T;
+    return JSON.parse(candidate) as T;
   } catch {
     // JSON truncated — try to repair closing brackets
-    let fixed = jsonMatch[0];
+    let fixed = candidate;
     fixed = fixed.replace(/,\s*$/, '');
     const opens = (fixed.match(/\[/g) || []).length - (fixed.match(/\]/g) || []).length;
     const braces = (fixed.match(/\{/g) || []).length - (fixed.match(/\}/g) || []).length;

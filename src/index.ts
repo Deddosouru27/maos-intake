@@ -212,6 +212,24 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
   }, 45000);
 
   try {
+    // URL dedup: skip if same URL was ingested in the last 10 minutes
+    const { createClient: mkClient } = await import('@supabase/supabase-js');
+    const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+    const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+    if (pitstopUrl && pitstopKey) {
+      const sb = mkClient(pitstopUrl, pitstopKey);
+      const { data: recent } = await sb
+        .from('ingested_content')
+        .select('id')
+        .eq('source_url', url)
+        .gte('created_at', new Date(Date.now() - 10 * 60 * 1000).toISOString())
+        .limit(1);
+      if (recent && recent.length > 0) {
+        console.log('[DEDUP] URL already processed recently:', url);
+        return { duplicate: true };
+      }
+    }
+
     console.log('[INTAKE] 1. Fetching URL...');
     const fetched = await fetchRawContent(url, source);
 
