@@ -313,6 +313,14 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     const analysis = await analyzeWithChunking(rawText, url);
     console.log(`[INTAKE] 6. Analysis ok — items: ${analysis.knowledge_items.length}, immediate: ${analysis.overall_immediate}, strategic: ${analysis.overall_strategic}`);
 
+    if (analysis.category === 'parse_error') {
+      console.error('[INTAKE] Parse error — saving parse_error status, skipping pipeline');
+      if (ingestedId) {
+        await updateIngestedDone(ingestedId, analysis, 'parse_error', 0, false, 'parse_error');
+      }
+      return { notification: '⚠️ Haiku вернул не-JSON. Записано как parse_error.', analysis };
+    }
+
     const notification = await runPipeline(ingestedId, analysis, url, source, contentHash);
     console.log(`[INTAKE] 7. Done — ${notification}`);
     return { notification, analysis };

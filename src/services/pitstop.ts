@@ -105,6 +105,7 @@ export async function updateIngestedDone(
   routingResult: string,
   savedCount?: number,
   isGuide?: boolean,
+  status?: string,
 ): Promise<void> {
   let supabase;
   try {
@@ -117,7 +118,7 @@ export async function updateIngestedDone(
   const { error } = await supabase
     .from('ingested_content')
     .update({
-      processing_status: 'done',
+      processing_status: status ?? 'done',
       summary: analysis.summary,
       overall_immediate: analysis.overall_immediate,
       overall_strategic: analysis.overall_strategic,

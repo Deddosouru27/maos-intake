@@ -238,13 +238,25 @@ Extract 8-12 insights as JSON. Remember: CONCISE, no ads, only actionable insigh
   console.log(`[INTAKE] Haiku cost: $${cost.toFixed(4)} (in:${inputTokens} out:${outputTokens})`);
 
   const raw = message.content[0].type === 'text' ? message.content[0].text : '';
+  console.log('[HAIKU] Raw response first 200 chars:', raw.slice(0, 200));
 
   let compact: CompactResponse;
   try {
     compact = parseHaikuJSON<CompactResponse>(raw);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`Failed to parse Haiku response: ${msg}`);
+    console.error('[HAIKU] JSON parse failed:', msg);
+    console.error('[HAIKU] Attempted to parse (first 300):', raw.slice(0, 300));
+    return {
+      summary: 'JSON parse failed',
+      knowledge_items: [],
+      overall_immediate: 0,
+      overall_strategic: 0,
+      priority_signal: false,
+      priority_reason: 'parse_error',
+      category: 'parse_error',
+      language: 'other',
+    };
   }
 
   const analysis = expandCompactResponse(compact);
