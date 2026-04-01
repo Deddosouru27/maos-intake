@@ -7,7 +7,7 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const SYSTEM_PROMPT = `You are a knowledge extraction engine. Extract insights from content.
 ALWAYS respond in Russian. All content, business_value, and summary must be in Russian language.
 RULES:
-Extract 8-12 insights. More is better than fewer.
+Extract MAX 5 insights. Choose the 5 most important and actionable.
 IGNORE: ads, sponsors, promotions, self-promotion, affiliate links, off-topic tangents.
 IGNORE: product placements, affiliate promotions, unrelated tangents. Only extract insights about the main topic.
 Each insight must be actionable or strategically valuable.
@@ -231,7 +231,7 @@ Extract 8-12 insights as JSON. Remember: CONCISE, no ads, only actionable insigh
 
   const message = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 4096,
+    max_tokens: 2048,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: userPrompt }],
   });
