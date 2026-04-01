@@ -13,7 +13,16 @@ IGNORE: product placements, affiliate promotions, unrelated tangents. Only extra
 Each insight must be actionable or strategically valuable.
 Be CONCISE. Maximum 2 sentences per insight.
 business_value: 1 sentence only.
-Output ONLY valid JSON. No markdown, no commentary.`;
+Output ONLY valid JSON. No markdown, no commentary.
+SCORING CALIBRATION:
+- immediate_relevance (r) 0.7+ means: THIS DIRECTLY SOLVES a current task or current_need listed in context. Not just 'related to AI'. Must match a SPECIFIC project need.
+- immediate_relevance 0.3-0.7 means: useful for our direction but no specific task right now
+- immediate_relevance <0.3 means: interesting but not related to current projects
+- strategic_relevance (s) 0.7+ means: directly in our knowledge_domains with high priority
+- strategic_relevance 0.3-0.7 means: tangentially related to our domains
+- strategic_relevance <0.3 means: outside our focus areas
+- Be STRICT. Most content should score 0.4-0.6. Only truly actionable items get 0.7+.
+- Generic AI advice without specific tool/method = max 0.5 immediate.`;
 
 async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
