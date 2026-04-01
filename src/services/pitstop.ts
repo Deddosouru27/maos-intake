@@ -189,24 +189,23 @@ export async function saveToPitstop(
     return;
   }
 
-  const row = {
-    summary: analysis.summary.slice(0, 80),
-    content: analysis.summary,
-    extracted_ideas: hotItems,
+  const rows = hotItems.map((item) => ({
+    content: item.content,
+    summary: item.content.slice(0, 80),
+    ai_category: item.knowledge_type,
     source_type: sourceType,
     source_url: sourceUrl ?? null,
-    ai_category: analysis.category,
     relevance: 'hot',
     ai_analysis: analysis,
     status: 'new',
     project_id: null,
-  };
+  }));
 
-  const { error } = await supabase.from('ideas').insert(row);
+  const { error } = await supabase.from('ideas').insert(rows);
 
   if (error) {
     console.error('[pitstop] ideas INSERT failed:', JSON.stringify(error));
   } else {
-    console.log(`[pitstop] saved hot ideas from ${sourceType} (${hotItems.length} items)`);
+    console.log(`[pitstop] saved ${hotItems.length} hot ideas from ${sourceType}`);
   }
 }

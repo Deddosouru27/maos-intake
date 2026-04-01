@@ -177,10 +177,14 @@ async function runPipeline(
     await updateIngestedDone(ingestedId, analysis, routingResult);
   }
 
+  // Filter discarded items — don't pollute extracted_knowledge with noise
+  const itemsToSave = routed.filter((i) => i.strategic_relevance >= 0.3 || i.immediate_relevance >= 0.3);
+  console.log(`[PIPELINE] items to save: ${itemsToSave.length}/${routed.length} (discarded noise: ${routed.length - itemsToSave.length})`);
+
   // Save in parallel
   console.log('[PIPELINE] saving extracted_knowledge / ideas...');
   const results = await Promise.allSettled([
-    saveExtractedKnowledge(routed, ingestedId, sourceUrl, sourceType),
+    saveExtractedKnowledge(itemsToSave, ingestedId, sourceUrl, sourceType),
     saveToPitstop(analysis, hotItems, sourceType, sourceUrl),
   ]);
   results.forEach((r, i) => {

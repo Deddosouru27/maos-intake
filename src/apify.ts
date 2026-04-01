@@ -125,7 +125,7 @@ export async function fetchInstagramTranscript(
               `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-large-v3\r\n`,
             ));
             parts.push(Buffer.from(
-              `--${boundary}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\nStackAuth, Supabase, Vercel, OpenRouter, Claude, Anthropic, Apify, Obsidian, Figma, GitHub, Railway, Telegram, Pitstop, MAOS\r\n`,
+              `--${boundary}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\nStackAuth, Supabase, Vercel, OpenRouter, Claude, Anthropic, Apify, Obsidian, Figma, GitHub, Railway, Telegram, Pitstop, MAOS, N8N, Cursor, v0, Windsurf, Replit\r\n`,
             ));
             parts.push(Buffer.from(`--${boundary}--\r\n`));
 
