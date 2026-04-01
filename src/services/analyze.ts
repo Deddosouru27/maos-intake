@@ -256,6 +256,7 @@ Extract 8-12 insights as JSON. Remember: CONCISE, no ads, only actionable insigh
       priority_reason: 'parse_error',
       category: 'parse_error',
       language: 'other',
+      _haiku_raw: raw.slice(0, 300),
     };
   }
 

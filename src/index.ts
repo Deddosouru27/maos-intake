@@ -166,7 +166,7 @@ async function runPipeline(
   sourceUrl: string,
   sourceType: string,
   contentHash: string,
-): Promise<{ notification: string; haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number }> {
+): Promise<{ notification: string; haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number; haikuRaw: string | null }> {
   // Guide detection
   const guidePattern = /guide|tutorial|step-by-step|how to|гайд|инструкция/i;
   const isGuide = guidePattern.test(analysis.summary);
@@ -239,10 +239,11 @@ async function runPipeline(
     itemsToSave: itemsToSave.length,
     savedItems: knowledgeSaved.length,
     dedupSkipped,
+    haikuRaw: null,
   };
 }
 
-interface PipelineDiag { haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number }
+interface PipelineDiag { haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number; haikuRaw: string | null }
 async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis; diag: PipelineDiag } | { duplicate: true } | { youtube_unavailable: true }> {
   // 45s hard timeout — Vercel maxDuration is 60s, leaves buffer for network
   const timeoutId = setTimeout(() => {
@@ -287,7 +288,7 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
 
     if (rawText.length < 30) {
       console.error('[PIPELINE] Content too short or empty — aborting, rawText:', JSON.stringify(rawText));
-      return { notification: '⚠️ Контент не получен (пустой ответ от источника)', analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'empty', language: 'other' }, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0 } };
+      return { notification: '⚠️ Контент не получен (пустой ответ от источника)', analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'empty', language: 'other' }, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, haikuRaw: null } };
     }
 
     const contentHash = computeHash(rawText);
@@ -336,7 +337,7 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
       if (ingestedId) {
         await updateIngestedDone(ingestedId, analysis, 'parse_error', 0, false, 'parse_error');
       }
-      return { notification: '⚠️ Haiku вернул не-JSON. Записано как parse_error.', analysis, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0 } };
+      return { notification: '⚠️ Haiku вернул не-JSON. Записано как parse_error.', analysis, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, haikuRaw: analysis._haiku_raw ?? null } };
     }
 
     const diag = await runPipeline(ingestedId, analysis, url, source, contentHash);

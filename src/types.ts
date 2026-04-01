@@ -56,4 +56,5 @@ export interface BrainAnalysis {
   priority_reason: string;
   category: string;
   language: string;
+  _haiku_raw?: string;
 }
