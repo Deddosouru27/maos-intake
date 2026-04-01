@@ -240,26 +240,32 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
   }, 45000);
 
   try {
-    // URL dedup: skip if same URL was ingested in the last 10 minutes
+    console.log('[PIPELINE] Starting for URL:', url, '| source:', source);
+
+    // URL dedup: skip if same URL was ingested successfully in the last 10 minutes
     const { createClient: mkClient } = await import('@supabase/supabase-js');
     const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
     const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
     if (pitstopUrl && pitstopKey) {
       const sb = mkClient(pitstopUrl, pitstopKey);
-      const { data: recent } = await sb
+      const { data: recent, error: dedupErr } = await sb
         .from('ingested_content')
         .select('id')
         .eq('source_url', url)
         .eq('processing_status', 'done')
         .gte('created_at', new Date(Date.now() - 10 * 60 * 1000).toISOString())
         .limit(1);
+      console.log('[PIPELINE] URL dedup check — recent done rows:', recent?.length ?? 0, dedupErr ? `err: ${dedupErr.message}` : 'ok');
       if (recent && recent.length > 0) {
-        console.log('[DEDUP] URL already processed recently:', url);
+        console.log('[PIPELINE] URL dedup HIT — skipping:', url);
         return { duplicate: true };
       }
+    } else {
+      console.warn('[PIPELINE] PITSTOP env not set — skipping URL dedup');
     }
+    console.log('[PIPELINE] URL dedup passed');
 
-    console.log('[INTAKE] 1. Fetching URL...');
+    console.log('[PIPELINE] 1. Fetching content...');
     const fetched = await fetchRawContent(url, source);
 
     if (fetched.youtube_unavailable) {
@@ -267,22 +273,27 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     }
 
     const { rawText, title } = fetched;
-    console.log(`[INTAKE] 2. Fetched ${rawText.length} chars, title: ${title ?? 'none'}`);
+    console.log(`[PIPELINE] 2. Fetched ${rawText.length} chars, title: ${title ?? 'none'}`);
+
+    if (rawText.length < 30) {
+      console.error('[PIPELINE] Content too short or empty — aborting, rawText:', JSON.stringify(rawText));
+      return { notification: '⚠️ Контент не получен (пустой ответ от источника)', analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'empty', language: 'other' } };
+    }
 
     const contentHash = computeHash(rawText);
-    console.log('[INTAKE] 3. Dedup check, hash:', contentHash.slice(0, 8));
+    console.log('[PIPELINE] 3. Content hash:', contentHash.slice(0, 8));
 
     let context;
     try {
       context = await getFullContext();
     } catch (err) {
-      console.error('[INTAKE] getFullContext FAILED:', err instanceof Error ? err.message : String(err));
+      console.error('[PIPELINE] getFullContext FAILED:', err instanceof Error ? err.message : String(err));
       throw err;
     }
-    console.log('[INTAKE] 4. Context ok — projects:', context.projects.length, 'domains:', context.domains.length, 'recentHashes:', context.recentHashes.length);
+    console.log('[PIPELINE] 4. Context ok — projects:', context.projects.length, 'domains:', context.domains.length, 'recentHashes:', context.recentHashes.length);
 
     if (context.recentHashes.includes(contentHash)) {
-      console.log('[INTAKE] Duplicate content hash:', contentHash.slice(0, 8), '— skipping');
+      console.log('[PIPELINE] Content hash dedup HIT:', contentHash.slice(0, 8), '— skipping');
       return { duplicate: true };
     }
 
@@ -290,29 +301,25 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     if (source === 'youtube') {
       const videoId = extractVideoId(url);
       if (videoId && context.recentHashes.length > 0) {
-        // recentHashes come from ingested_content — check source_url instead via supabase
         const { createClient } = await import('@supabase/supabase-js');
-        const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
-        const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
         if (pitstopUrl && pitstopKey) {
           const sb = createClient(pitstopUrl, pitstopKey);
           const { data } = await sb.from('ingested_content').select('id').ilike('source_url', `%${videoId}%`).limit(1);
           if (data && data.length > 0) {
-            console.log('[INTAKE] Duplicate YouTube video ID:', videoId);
+            console.log('[PIPELINE] YouTube video ID dedup HIT:', videoId);
             return { duplicate: true };
           }
         }
       }
     }
 
-    // Insert pending BEFORE Haiku — dedup works even if analysis fails
-    console.log('[INTAKE] 4.5. Calling insertIngestedPending, source:', source, 'hash:', contentHash.slice(0, 8));
+    console.log('[PIPELINE] 4.5. Inserting ingested_content (pending)...');
     const ingestedId = await insertIngestedPending(rawText, url, source, title, contentHash);
-    console.log('[INTAKE] 4.5. Done, ingestedId:', ingestedId);
+    console.log('[PIPELINE] 4.5. ingestedId:', ingestedId);
 
-    console.log('[INTAKE] 5. Haiku analysis...');
+    console.log('[PIPELINE] 5. Haiku analysis...');
     const analysis = await analyzeWithChunking(rawText, url);
-    console.log(`[INTAKE] 6. Analysis ok — items: ${analysis.knowledge_items.length}, immediate: ${analysis.overall_immediate}, strategic: ${analysis.overall_strategic}`);
+    console.log(`[PIPELINE] 6. Analysis — items: ${analysis.knowledge_items.length}, immediate: ${analysis.overall_immediate.toFixed(2)}, strategic: ${analysis.overall_strategic.toFixed(2)}, category: ${analysis.category}`);
 
     if (analysis.category === 'parse_error') {
       console.error('[INTAKE] Parse error — saving parse_error status, skipping pipeline');
