@@ -22,11 +22,11 @@ export async function fetchInstagramTranscript(
     // Step 1: Start actor
     console.log('[APIFY] Step 1: Starting actor apify/instagram-reel-scraper...');
     const startResp = await fetch(
-      `${APIFY_BASE}/acts/apify~instagram-reel-scraper/runs?token=${token}`,
+      `${APIFY_BASE}/acts/apify~instagram-scraper/runs?token=${token}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ directUrls: [url], resultsLimit: 1 }),
+        body: JSON.stringify({ directUrls: [url], resultsLimit: 1, resultsType: 'posts' }),
         signal: AbortSignal.timeout(15000),
       },
     );
