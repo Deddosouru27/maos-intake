@@ -167,7 +167,7 @@ export async function saveExtractedKnowledge(
       const { data: similar } = await supabase.rpc('match_knowledge', {
         query_embedding: embedding,
         match_count: 1,
-        similarity_threshold: 0.9,
+        similarity_threshold: 0.97,
       });
       if (similar && (similar as { similarity: number }[]).length > 0) {
         const sim = (similar as { similarity: number }[])[0].similarity;
