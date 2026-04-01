@@ -48,6 +48,8 @@ const processLimiter = rateLimit({
 
 type Source = 'youtube' | 'instagram' | 'article' | 'url' | 'thread';
 
+const VALID_SOURCES = new Set<string>(['youtube', 'instagram', 'article', 'thread']);
+
 interface ProcessBody {
   url?: string;
   source?: Source;
@@ -56,8 +58,9 @@ interface ProcessBody {
   source_type?: string;
 }
 
-function detectSource(url: string, provided?: Source): Source {
-  if (provided && provided !== 'url') return provided;
+function detectSource(url: string, provided?: string): Source {
+  // Only trust provided if it's a known valid source — rejects 'link', 'url', garbage
+  if (provided && VALID_SOURCES.has(provided)) return provided as Source;
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
   if (url.includes('twitter.com') || url.includes('x.com') || url.includes('threads.net'))
     return 'thread';
@@ -283,7 +286,7 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
       return;
     }
     const title = bodyTitle || 'Manual paste';
-    const sourceType = bodySourceType || 'text';
+    const sourceType = (bodySourceType && bodySourceType !== 'link') ? bodySourceType : 'text';
     const label = `manual:${title.slice(0, 50)}`;
 
     try {
