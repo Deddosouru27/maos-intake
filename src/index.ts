@@ -4,7 +4,7 @@ import express, { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
-import { analyzeContent } from './services/analyze';
+import { analyzeContent, analyzeWithChunking } from './services/analyze';
 import { insertIngestedPending, updateIngestedDone, saveExtractedKnowledge, saveToPitstop } from './services/pitstop';
 import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
@@ -254,8 +254,8 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     const ingestedId = await insertIngestedPending(rawText, url, source, title, contentHash);
     console.log('[INTAKE] 4.5. Done, ingestedId:', ingestedId);
 
-    console.log('[INTAKE] 5. Haiku analysis (single call, no retry)...');
-    const analysis = await analyzeContent(rawText, url);
+    console.log('[INTAKE] 5. Haiku analysis...');
+    const analysis = await analyzeWithChunking(rawText, url);
     console.log(`[INTAKE] 6. Analysis ok — items: ${analysis.knowledge_items.length}, immediate: ${analysis.overall_immediate}, strategic: ${analysis.overall_strategic}`);
 
     const notification = await runPipeline(ingestedId, analysis, url, source, contentHash);
@@ -338,8 +338,8 @@ async function rawTextPipeline(
 
   const ingestedId = await insertIngestedPending(rawText, label, sourceType, title, contentHash);
 
-  console.log('[INTAKE] 5. Haiku analysis (single call)...');
-  const analysis = await analyzeContent(rawText, label);
+  console.log('[INTAKE] 5. Haiku analysis...');
+  const analysis = await analyzeWithChunking(rawText, label);
 
   const notification = await runPipeline(ingestedId, analysis, label, sourceType, contentHash);
   console.log(`[INTAKE] Done — ${notification}`);
@@ -380,14 +380,45 @@ app.post('/process-file', processLimiter, async (req: Request, res: Response) =>
 });
 
 interface BatchBody {
-  urls: string[];
+  urls?: string[];
+  texts?: string[];
+  text?: string;
+  source_type?: string;
+  title?: string;
 }
 
 app.post('/batch', processLimiter, async (req: Request, res: Response) => {
-  const { urls } = req.body as BatchBody;
+  const { urls, texts: bodyTexts, text: bodyText, source_type: bodySourceType, title: bodyTitle } = req.body as BatchBody;
+
+  // Text batch mode: { texts: string[] } or { text: string } split by ---
+  if (bodyTexts || bodyText) {
+    const blocks = bodyTexts ?? (bodyText ?? '').split(/\n---\n/).map((s) => s.trim()).filter(Boolean);
+    if (blocks.length === 0) {
+      res.status(400).json({ error: 'No text blocks provided' });
+      return;
+    }
+    const sourceType = bodySourceType || 'text';
+    const results: { notification: string; items: number }[] = [];
+    const errors: { index: number; error: string }[] = [];
+    for (let i = 0; i < Math.min(blocks.length, 10); i++) {
+      try {
+        const result = await rawTextPipeline(blocks[i], sourceType, `batch:${i}`, bodyTitle);
+        if ('duplicate' in result) {
+          results.push({ notification: '♻️ duplicate', items: 0 });
+        } else {
+          results.push({ notification: result.notification, items: result.analysis.knowledge_items.length });
+        }
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        errors.push({ index: i, error: message });
+      }
+    }
+    res.json({ processed: results.length, results, errors });
+    return;
+  }
 
   if (!Array.isArray(urls) || urls.length === 0) {
-    res.status(400).json({ error: 'urls must be a non-empty array' });
+    res.status(400).json({ error: 'urls or texts required' });
     return;
   }
 

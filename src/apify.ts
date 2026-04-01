@@ -150,9 +150,12 @@ export async function fetchInstagramTranscript(
 
               if (result.text && result.text.length > 20) {
                 console.log('[APIFY] === SUCCESS: Audio transcript ===');
+                const combinedText = caption.length > 50
+                  ? `[AUDIO]\n${result.text}\n\n[CAPTION]\n${caption}`
+                  : result.text;
                 return {
-                  title: `Instagram @${owner} (audio)`,
-                  text: result.text,
+                  title: `Instagram @${owner}` + (caption.length > 50 ? ' (audio+caption)' : ' (audio)'),
+                  text: combinedText,
                   sourceType: 'instagram',
                 };
               }

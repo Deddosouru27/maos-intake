@@ -133,6 +133,55 @@ function expandCompactResponse(parsed: CompactResponse): BrainAnalysis {
 }
 
 const MAX_CHARS_FOR_HAIKU = 12000;
+const MAX_CHUNK_WORDS = 4000;
+const CHUNK_OVERLAP = 200;
+const MAX_CHUNKS = 20;
+
+export async function analyzeWithChunking(text: string, source: string): Promise<BrainAnalysis> {
+  const words = text.split(/\s+/).filter(Boolean);
+
+  if (words.length <= MAX_CHUNK_WORDS) {
+    return analyzeContent(text, source);
+  }
+
+  const chunks: string[] = [];
+  for (let i = 0; i < words.length; i += MAX_CHUNK_WORDS - CHUNK_OVERLAP) {
+    chunks.push(words.slice(i, i + MAX_CHUNK_WORDS).join(' '));
+    if (chunks.length >= MAX_CHUNKS) break;
+  }
+  console.log(`[CHUNKING] ${words.length} words → ${chunks.length} chunks`);
+
+  const allItems: KnowledgeItem[] = [];
+  let firstSummary = '';
+  let maxImmediate = 0;
+  let maxStrategic = 0;
+  let prioritySignal = false;
+
+  for (let i = 0; i < chunks.length; i++) {
+    console.log(`[CHUNKING] chunk ${i + 1}/${chunks.length}`);
+    try {
+      const result = await analyzeContent(chunks[i], source);
+      allItems.push(...result.knowledge_items);
+      if (i === 0) firstSummary = result.summary;
+      maxImmediate = Math.max(maxImmediate, result.overall_immediate);
+      maxStrategic = Math.max(maxStrategic, result.overall_strategic);
+      if (result.priority_signal) prioritySignal = true;
+    } catch (e) {
+      console.error(`[CHUNKING] chunk ${i + 1} failed:`, e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return {
+    summary: firstSummary || `Обработано ${chunks.length} частей, извлечено ${allItems.length} знаний`,
+    knowledge_items: allItems,
+    overall_immediate: maxImmediate,
+    overall_strategic: maxStrategic,
+    priority_signal: prioritySignal,
+    priority_reason: '',
+    category: 'other',
+    language: 'other',
+  };
+}
 
 export async function analyzeContent(text: string, source: string): Promise<BrainAnalysis> {
   const trimmedText = text.length > MAX_CHARS_FOR_HAIKU
