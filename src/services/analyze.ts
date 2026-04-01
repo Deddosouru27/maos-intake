@@ -58,7 +58,11 @@ function repairControlChars(s: string): string {
 }
 
 function parseHaikuJSON<T>(text: string): T {
-  const cleaned = text.replace(/```json\s*/g, '').replace(/```/g, '').trim();
+  let cleaned = text.trim();
+  if (cleaned.startsWith('```json')) cleaned = cleaned.slice(7);
+  if (cleaned.startsWith('```')) cleaned = cleaned.slice(3);
+  if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
+  cleaned = cleaned.trim();
   const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
     throw new Error('No JSON found in: ' + text.substring(0, 200));
