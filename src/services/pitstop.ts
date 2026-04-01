@@ -142,15 +142,15 @@ export async function saveExtractedKnowledge(
   ingestedContentId: string | null,
   sourceUrl: string,
   sourceType: string,
-): Promise<{ id: string; content: string }[]> {
-  if (items.length === 0) return [];
+): Promise<{ saved: { id: string; content: string }[]; dedupSkipped: number }> {
+  if (items.length === 0) return { saved: [], dedupSkipped: 0 };
 
   let supabase;
   try {
     supabase = getClient();
   } catch (err) {
     console.error('[pitstop] knowledge client init failed:', err);
-    return [];
+    return { saved: [], dedupSkipped: 0 };
   }
 
   console.log('[SAVE] Items count:', items?.length);
@@ -226,7 +226,7 @@ export async function saveExtractedKnowledge(
   }
 
   console.log(`[INTAKE] extracted_knowledge saved: ${saved.length} items, dedup skipped: ${dedupSkipped}`);
-  return saved;
+  return { saved, dedupSkipped };
 }
 
 export async function saveToPitstop(

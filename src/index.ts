@@ -166,7 +166,7 @@ async function runPipeline(
   sourceUrl: string,
   sourceType: string,
   contentHash: string,
-): Promise<string> {
+): Promise<{ notification: string; haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number }> {
   // Guide detection
   const guidePattern = /guide|tutorial|step-by-step|how to|гайд|инструкция/i;
   const isGuide = guidePattern.test(analysis.summary);
@@ -215,9 +215,12 @@ async function runPipeline(
   // Save extracted_knowledge first to get IDs, then link ideas
   console.log('[PIPELINE] saving extracted_knowledge...');
   let knowledgeSaved: { id: string; content: string }[] = [];
+  let dedupSkipped = 0;
   try {
-    knowledgeSaved = await saveExtractedKnowledge(itemsToSave, ingestedId, sourceUrl, sourceType);
-    console.log('[PIPELINE] extracted_knowledge ok:', knowledgeSaved.length);
+    const result = await saveExtractedKnowledge(itemsToSave, ingestedId, sourceUrl, sourceType);
+    knowledgeSaved = result.saved;
+    dedupSkipped = result.dedupSkipped;
+    console.log('[PIPELINE] extracted_knowledge ok:', knowledgeSaved.length, 'saved,', dedupSkipped, 'dedup skipped');
   } catch (e) {
     console.error('[PIPELINE] extracted_knowledge failed:', e instanceof Error ? e.message : String(e));
   }
@@ -230,10 +233,17 @@ async function runPipeline(
     console.error('[PIPELINE] ideas failed:', e instanceof Error ? e.message : String(e));
   }
 
-  return notification;
+  return {
+    notification,
+    haikuItems: analysis.knowledge_items.length,
+    itemsToSave: itemsToSave.length,
+    savedItems: knowledgeSaved.length,
+    dedupSkipped,
+  };
 }
 
-async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis } | { duplicate: true } | { youtube_unavailable: true }> {
+interface PipelineDiag { haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number }
+async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis; diag: PipelineDiag } | { duplicate: true } | { youtube_unavailable: true }> {
   // 45s hard timeout — Vercel maxDuration is 60s, leaves buffer for network
   const timeoutId = setTimeout(() => {
     throw new Error('[INTAKE] Pipeline timeout (45s)');
@@ -277,7 +287,7 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
 
     if (rawText.length < 30) {
       console.error('[PIPELINE] Content too short or empty — aborting, rawText:', JSON.stringify(rawText));
-      return { notification: '⚠️ Контент не получен (пустой ответ от источника)', analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'empty', language: 'other' } };
+      return { notification: '⚠️ Контент не получен (пустой ответ от источника)', analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'empty', language: 'other' }, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0 } };
     }
 
     const contentHash = computeHash(rawText);
@@ -326,12 +336,12 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
       if (ingestedId) {
         await updateIngestedDone(ingestedId, analysis, 'parse_error', 0, false, 'parse_error');
       }
-      return { notification: '⚠️ Haiku вернул не-JSON. Записано как parse_error.', analysis };
+      return { notification: '⚠️ Haiku вернул не-JSON. Записано как parse_error.', analysis, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0 } };
     }
 
-    const notification = await runPipeline(ingestedId, analysis, url, source, contentHash);
-    console.log(`[INTAKE] 7. Done — ${notification}`);
-    return { notification, analysis };
+    const diag = await runPipeline(ingestedId, analysis, url, source, contentHash);
+    console.log(`[INTAKE] 7. Done — ${diag.notification} | haiku:${diag.haikuItems} itemsToSave:${diag.itemsToSave} saved:${diag.savedItems} dedup:${diag.dedupSkipped}`);
+    return { notification: diag.notification, analysis, diag };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -356,7 +366,7 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
       if ('duplicate' in result) {
         res.json({ status: 'duplicate', notification: '♻️ Этот контент уже обрабатывался' });
       } else {
-        res.json({ status: 'done', notification: result.notification, ...result.analysis });
+        res.json({ status: 'done', notification: result.notification, _diag: result.diag, ...result.analysis });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -383,7 +393,7 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
     } else if ('duplicate' in result) {
       res.json({ status: 'duplicate', notification: '♻️ Этот контент уже обрабатывался' });
     } else {
-      res.json({ status: 'done', notification: result.notification, ...result.analysis });
+      res.json({ status: 'done', notification: result.notification, _diag: result.diag, ...result.analysis });
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -398,7 +408,7 @@ async function rawTextPipeline(
   sourceType: string,
   label: string,
   title?: string,
-): Promise<{ notification: string; analysis: BrainAnalysis } | { duplicate: true }> {
+): Promise<{ notification: string; analysis: BrainAnalysis; diag: PipelineDiag } | { duplicate: true }> {
   const contentHash = computeHash(rawText);
 
   const context = await getFullContext();
@@ -412,9 +422,9 @@ async function rawTextPipeline(
   console.log('[INTAKE] 5. Haiku analysis...');
   const analysis = await analyzeWithChunking(rawText, label);
 
-  const notification = await runPipeline(ingestedId, analysis, label, sourceType, contentHash);
-  console.log(`[INTAKE] Done — ${notification}`);
-  return { notification, analysis };
+  const diag = await runPipeline(ingestedId, analysis, label, sourceType, contentHash);
+  console.log(`[INTAKE] Done — ${diag.notification}`);
+  return { notification: diag.notification, analysis, diag };
 }
 
 interface ProcessFileBody {
