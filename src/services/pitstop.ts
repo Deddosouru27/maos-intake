@@ -1,5 +1,22 @@
 import { createClient } from '@supabase/supabase-js';
+import OpenAI from 'openai';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem } from '../types';
+
+const openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+async function getEmbedding(text: string): Promise<number[] | null> {
+  try {
+    const resp = await openaiClient.embeddings.create({
+      model: 'text-embedding-3-small',
+      input: text.slice(0, 8000),
+      dimensions: 512,
+    });
+    return resp.data[0].embedding;
+  } catch (err) {
+    console.error('[pitstop] embedding error:', err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
 
 function getClient() {
   const url = process.env.PITSTOP_SUPABASE_URL;
@@ -167,6 +184,20 @@ export async function saveExtractedKnowledge(
 
   const saved = (data as { id: string; content: string }[] | null) ?? [];
   console.log('[INTAKE] extracted_knowledge saved:', saved.length, 'items');
+
+  // Generate and store embeddings
+  for (const row of saved) {
+    const embedding = await getEmbedding(row.content);
+    if (!embedding) continue;
+    const { error: embErr } = await supabase
+      .from('extracted_knowledge')
+      .update({ embedding })
+      .eq('id', row.id);
+    if (embErr) {
+      console.error('[pitstop] embedding update error for', row.id, embErr.message);
+    }
+  }
+
   return saved;
 }
 
