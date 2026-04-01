@@ -162,7 +162,7 @@ export async function saveExtractedKnowledge(
     // Get embedding first — needed for both dedup check and storage
     const embedding = await getEmbedding(item.content);
 
-    // Semantic dedup: skip if a very similar item already exists (sim >= 0.9)
+    // Semantic dedup: skip if a very similar item already exists (sim >= 0.97)
     if (embedding) {
       const { data: similar } = await supabase.rpc('match_knowledge', {
         query_embedding: embedding,
