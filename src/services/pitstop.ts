@@ -153,7 +153,8 @@ export async function saveExtractedKnowledge(
     return [];
   }
 
-  console.log('[INTAKE] Saving to extracted_knowledge:', { count: items.length });
+  console.log('[SAVE] Items count:', items?.length);
+  console.log('[SAVE] Items to save:', JSON.stringify(items?.map((i) => i.content?.slice(0, 50))));
 
   const saved: { id: string; content: string }[] = [];
   let dedupSkipped = 0;

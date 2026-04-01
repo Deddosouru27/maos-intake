@@ -259,6 +259,9 @@ Extract 8-12 insights as JSON. Remember: CONCISE, no ads, only actionable insigh
     };
   }
 
+  console.log('[ANALYZE] Parsed result keys:', Object.keys(compact));
+  console.log('[ANALYZE] Items count:', compact?.items?.length ?? 0);
+
   const analysis = expandCompactResponse(compact);
 
   if (analysis.priority_signal) {
