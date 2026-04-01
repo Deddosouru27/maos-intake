@@ -152,52 +152,76 @@ export async function saveExtractedKnowledge(
 
   console.log('[INTAKE] Saving to extracted_knowledge:', { count: items.length });
 
-  const rows = items.map((item) => ({
-    ingested_content_id: ingestedContentId,
-    content: item.content,
-    knowledge_type: item.knowledge_type,
-    project_id: null,
-    domain_ids: null,
-    solves_need: item.solves_need,
-    immediate_relevance: item.immediate_relevance,
-    strategic_relevance: item.strategic_relevance,
-    novelty: item.novelty,
-    effort: item.effort,
-    has_ready_code: item.has_ready_code,
-    business_value: item.business_value ?? null,
-    tags: item.tags,
-    routed_to: [item.routed_to],
-    language: null,
-    source_url: sourceUrl,
-    source_type: sourceType,
-  }));
+  const saved: { id: string; content: string }[] = [];
+  let dedupSkipped = 0;
 
-  const { data, error } = await supabase
-    .from('extracted_knowledge')
-    .insert(rows)
-    .select('id, content');
+  for (const item of items) {
+    // Get embedding first — needed for both dedup check and storage
+    const embedding = await getEmbedding(item.content);
 
-  if (error) {
-    console.error('[INTAKE] extracted_knowledge ERROR:', JSON.stringify(error));
-    return [];
-  }
+    // Semantic dedup: skip if a very similar item already exists (sim >= 0.9)
+    if (embedding) {
+      const { data: similar } = await supabase.rpc('match_knowledge', {
+        query_embedding: embedding,
+        match_count: 1,
+        similarity_threshold: 0.9,
+      });
+      if (similar && (similar as { similarity: number }[]).length > 0) {
+        const sim = (similar as { similarity: number }[])[0].similarity;
+        console.log(`[DEDUP] Skipping duplicate: ${item.content.slice(0, 50)}... (sim: ${sim.toFixed(3)})`);
+        dedupSkipped++;
+        continue;
+      }
+    }
 
-  const saved = (data as { id: string; content: string }[] | null) ?? [];
-  console.log('[INTAKE] extracted_knowledge saved:', saved.length, 'items');
+    const row = {
+      ingested_content_id: ingestedContentId,
+      content: item.content,
+      knowledge_type: item.knowledge_type,
+      project_id: null,
+      domain_ids: null,
+      solves_need: item.solves_need,
+      immediate_relevance: item.immediate_relevance,
+      strategic_relevance: item.strategic_relevance,
+      novelty: item.novelty,
+      effort: item.effort,
+      has_ready_code: item.has_ready_code,
+      business_value: item.business_value ?? null,
+      tags: item.tags,
+      routed_to: [item.routed_to],
+      language: null,
+      source_url: sourceUrl,
+      source_type: sourceType,
+    };
 
-  // Generate and store embeddings
-  for (const row of saved) {
-    const embedding = await getEmbedding(row.content);
-    if (!embedding) continue;
-    const { error: embErr } = await supabase
+    const { data, error } = await supabase
       .from('extracted_knowledge')
-      .update({ embedding })
-      .eq('id', row.id);
-    if (embErr) {
-      console.error('[pitstop] embedding update error for', row.id, embErr.message);
+      .insert(row)
+      .select('id, content')
+      .single();
+
+    if (error) {
+      console.error('[INTAKE] extracted_knowledge INSERT error:', JSON.stringify(error));
+      continue;
+    }
+
+    const inserted = data as { id: string; content: string } | null;
+    if (!inserted) continue;
+    saved.push(inserted);
+
+    // Store embedding
+    if (embedding) {
+      const { error: embErr } = await supabase
+        .from('extracted_knowledge')
+        .update({ embedding })
+        .eq('id', inserted.id);
+      if (embErr) {
+        console.error('[pitstop] embedding update error for', inserted.id, embErr.message);
+      }
     }
   }
 
+  console.log(`[INTAKE] extracted_knowledge saved: ${saved.length} items, dedup skipped: ${dedupSkipped}`);
   return saved;
 }
 
