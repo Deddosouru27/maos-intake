@@ -598,7 +598,7 @@ app.post('/backfill-embeddings', async (_req: Request, res: Response) => {
     .from('extracted_knowledge')
     .select('id, content')
     .is('embedding', null)
-    .limit(50);
+    .limit(10);
 
   if (error) {
     res.status(500).json({ error: error.message });
