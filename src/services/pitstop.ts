@@ -122,29 +122,25 @@ export async function saveExtractedKnowledge(
   ingestedContentId: string | null,
   sourceUrl: string,
   sourceType: string,
-): Promise<void> {
-  if (items.length === 0) return;
+): Promise<{ id: string; content: string }[]> {
+  if (items.length === 0) return [];
 
   let supabase;
   try {
     supabase = getClient();
   } catch (err) {
     console.error('[pitstop] knowledge client init failed:', err);
-    return;
+    return [];
   }
 
   console.log('[INTAKE] Saving to extracted_knowledge:', { count: items.length });
 
-  // Schema: ingested_content_id, content, knowledge_type, project_id (uuid|null),
-  // domain_ids (uuid[]|null), solves_need, immediate_relevance, strategic_relevance,
-  // novelty, effort, has_ready_code, routed_to (text[]), tags (text[]),
-  // language, source_url, source_type
   const rows = items.map((item) => ({
     ingested_content_id: ingestedContentId,
     content: item.content,
     knowledge_type: item.knowledge_type,
-    project_id: null,       // no uuid mapping yet
-    domain_ids: null,       // no uuid mapping yet
+    project_id: null,
+    domain_ids: null,
     solves_need: item.solves_need,
     immediate_relevance: item.immediate_relevance,
     strategic_relevance: item.strategic_relevance,
@@ -153,7 +149,7 @@ export async function saveExtractedKnowledge(
     has_ready_code: item.has_ready_code,
     business_value: item.business_value ?? null,
     tags: item.tags,
-    routed_to: [item.routed_to], // text[] — wrap single value in array
+    routed_to: [item.routed_to],
     language: null,
     source_url: sourceUrl,
     source_type: sourceType,
@@ -162,13 +158,16 @@ export async function saveExtractedKnowledge(
   const { data, error } = await supabase
     .from('extracted_knowledge')
     .insert(rows)
-    .select('id');
+    .select('id, content');
 
   if (error) {
     console.error('[INTAKE] extracted_knowledge ERROR:', JSON.stringify(error));
-  } else {
-    console.log('[INTAKE] extracted_knowledge saved:', (data as { id: string }[] | null)?.length, 'items');
+    return [];
   }
+
+  const saved = (data as { id: string; content: string }[] | null) ?? [];
+  console.log('[INTAKE] extracted_knowledge saved:', saved.length, 'items');
+  return saved;
 }
 
 export async function saveToPitstop(
@@ -176,6 +175,7 @@ export async function saveToPitstop(
   hotItems: KnowledgeItem[],
   sourceType: string,
   sourceUrl?: string,
+  knowledgeSaved?: { id: string; content: string }[],
 ): Promise<void> {
   if (hotItems.length === 0) {
     console.log('[pitstop] no hot items to save to ideas');
@@ -190,6 +190,12 @@ export async function saveToPitstop(
     return;
   }
 
+  // Build content→id map for knowledge_id linkage
+  const knowledgeMap = new Map<string, string>();
+  for (const k of (knowledgeSaved ?? [])) {
+    knowledgeMap.set(k.content, k.id);
+  }
+
   const rows = hotItems.map((item) => ({
     content: item.content,
     summary: item.content.slice(0, 80),
@@ -200,6 +206,7 @@ export async function saveToPitstop(
     ai_analysis: analysis,
     status: 'new',
     project_id: null,
+    knowledge_id: knowledgeMap.get(item.content) ?? null,
   }));
 
   const { error } = await supabase.from('ideas').insert(rows);

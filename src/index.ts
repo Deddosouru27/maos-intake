@@ -181,17 +181,23 @@ async function runPipeline(
     await updateIngestedDone(ingestedId, analysis, routingResult, itemsToSave.length);
   }
 
-  // Save in parallel
-  console.log('[PIPELINE] saving extracted_knowledge / ideas...');
-  const results = await Promise.allSettled([
-    saveExtractedKnowledge(itemsToSave, ingestedId, sourceUrl, sourceType),
-    saveToPitstop(analysis, hotItems, sourceType, sourceUrl),
-  ]);
-  results.forEach((r, i) => {
-    const label = ['extracted_knowledge', 'ideas'][i];
-    if (r.status === 'rejected') console.error(`[PIPELINE] ${label} failed:`, r.reason);
-    else console.log(`[PIPELINE] ${label} ok`);
-  });
+  // Save extracted_knowledge first to get IDs, then link ideas
+  console.log('[PIPELINE] saving extracted_knowledge...');
+  let knowledgeSaved: { id: string; content: string }[] = [];
+  try {
+    knowledgeSaved = await saveExtractedKnowledge(itemsToSave, ingestedId, sourceUrl, sourceType);
+    console.log('[PIPELINE] extracted_knowledge ok:', knowledgeSaved.length);
+  } catch (e) {
+    console.error('[PIPELINE] extracted_knowledge failed:', e instanceof Error ? e.message : String(e));
+  }
+
+  console.log('[PIPELINE] saving ideas...');
+  try {
+    await saveToPitstop(analysis, hotItems, sourceType, sourceUrl, knowledgeSaved);
+    console.log('[PIPELINE] ideas ok');
+  } catch (e) {
+    console.error('[PIPELINE] ideas failed:', e instanceof Error ? e.message : String(e));
+  }
 
   return notification;
 }
