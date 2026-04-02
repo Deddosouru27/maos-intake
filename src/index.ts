@@ -52,7 +52,7 @@ app.use((req, res, next) => {
   }
   next();
 });
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use((req: Request, _res: Response, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
