@@ -22,7 +22,8 @@ SCORING CALIBRATION:
 - strategic_relevance 0.3-0.7 means: tangentially related to our domains
 - strategic_relevance <0.3 means: outside our focus areas
 - Be STRICT. Most content should score 0.4-0.6. Only truly actionable items get 0.7+.
-- Generic AI advice without specific tool/method = max 0.5 immediate.`;
+- Generic AI advice without specific tool/method = max 0.5 immediate.
+RESOURCES: If the content mentions specific tools, services, or repositories — add one extra item with t="tool" and content = name + URL (if available) + one sentence what it does. Only for concrete tools, not generic concepts.`;
 
 async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;

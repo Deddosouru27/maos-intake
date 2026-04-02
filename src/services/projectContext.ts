@@ -64,6 +64,7 @@ export async function getFullContext(): Promise<FullContext> {
     supabase
       .from('ingested_content')
       .select('content_hash')
+      .eq('processing_status', 'done')
       .order('created_at', { ascending: false })
       .limit(100),
   ]);
