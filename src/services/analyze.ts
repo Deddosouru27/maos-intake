@@ -22,7 +22,8 @@ STRICT CALIBRATION:
 - strategic_relevance (s) 0.7+ means: directly in our knowledge_domains with high priority
 - strategic_relevance 0.3-0.6 means: tangentially related to our domains
 - Target: 15-20% of items as hot (r>=0.7). If scoring more than 2 items above 0.7, reconsider.
-RESOURCES: If the content mentions specific tools, services, or repositories — add one extra item with t="tool" and content = name + URL (if available) + one sentence what it does. Only for concrete tools, not generic concepts.`;
+RESOURCES: If the content mentions specific tools, services, or repositories — add one extra item with t="tool" and content = name + URL (if available) + one sentence what it does. Only for concrete tools, not generic concepts.
+BATCH MODE: If the text contains multiple separate posts/messages (separated by ---, ===, or double newline + numbering), analyze EACH post separately. Extract insights from EACH post independently. Small posts may have 1-2 insights, large posts 5-8.`;
 
 async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -142,23 +143,22 @@ function expandCompactResponse(parsed: CompactResponse): BrainAnalysis {
 }
 
 const MAX_CHARS_FOR_HAIKU = 12000;
-const MAX_CHUNK_WORDS = 4000;
-const CHUNK_OVERLAP = 200;
+const MAX_CHUNK_CHARS = 3000;
+const CHUNK_OVERLAP_CHARS = 200;
+const CHUNKING_THRESHOLD = 4000; // chars
 const MAX_CHUNKS = 20;
 
 export async function analyzeWithChunking(text: string, source: string): Promise<BrainAnalysis> {
-  const words = text.split(/\s+/).filter(Boolean);
-
-  if (words.length <= MAX_CHUNK_WORDS) {
-    return analyzeContent(text, source);
+  if (text.length <= CHUNKING_THRESHOLD) {
+    return analyzeContent(text, source, false);
   }
 
   const chunks: string[] = [];
-  for (let i = 0; i < words.length; i += MAX_CHUNK_WORDS - CHUNK_OVERLAP) {
-    chunks.push(words.slice(i, i + MAX_CHUNK_WORDS).join(' '));
+  for (let i = 0; i < text.length; i += MAX_CHUNK_CHARS - CHUNK_OVERLAP_CHARS) {
+    chunks.push(text.slice(i, i + MAX_CHUNK_CHARS));
     if (chunks.length >= MAX_CHUNKS) break;
   }
-  console.log(`[CHUNKING] ${words.length} words → ${chunks.length} chunks`);
+  console.log(`[CHUNKING] ${text.length} chars → ${chunks.length} chunks`);
 
   const allItems: KnowledgeItem[] = [];
   let firstSummary = '';
@@ -169,7 +169,7 @@ export async function analyzeWithChunking(text: string, source: string): Promise
   for (let i = 0; i < chunks.length; i++) {
     console.log(`[CHUNKING] chunk ${i + 1}/${chunks.length}`);
     try {
-      const result = await analyzeContent(chunks[i], source);
+      const result = await analyzeContent(chunks[i], source, true);
       allItems.push(...result.knowledge_items);
       if (i === 0) firstSummary = result.summary;
       maxImmediate = Math.max(maxImmediate, result.overall_immediate);
@@ -192,7 +192,7 @@ export async function analyzeWithChunking(text: string, source: string): Promise
   };
 }
 
-export async function analyzeContent(text: string, source: string): Promise<BrainAnalysis> {
+export async function analyzeContent(text: string, source: string, isChunk = false): Promise<BrainAnalysis> {
   const trimmedText = text.length > MAX_CHARS_FOR_HAIKU
     ? text.substring(0, MAX_CHARS_FOR_HAIKU) + '\n[...текст обрезан...]'
     : text;
@@ -200,8 +200,8 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
   const context = await getFullContext();
   const trimmedContext = buildContextString(context);
 
-  const maxItems = trimmedText.length < 3000 ? 8 : 5;
-  console.log(`[ANALYZE] text length: ${trimmedText.length} chars → maxItems: ${maxItems}`);
+  const maxItems = isChunk ? 5 : (trimmedText.length < 3000 ? 8 : 5);
+  console.log(`[ANALYZE] text length: ${trimmedText.length} chars, isChunk: ${isChunk} → maxItems: ${maxItems}`);
 
   const userPrompt = `Content to analyze:
 """
