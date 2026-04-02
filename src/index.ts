@@ -116,12 +116,39 @@ function buildNotification(routed: RoutedKnowledgeItem[]): string {
   return '📭 Нерелевантен для наших направлений';
 }
 
-app.get('/health', (_req: Request, res: Response) => {
+let lastHeartbeatAt: string | null = null;
+
+app.get('/health', async (_req: Request, res: Response) => {
   const key = (name: string) => (process.env[name] ? 'connected' : 'missing_key');
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+
+  let knowledge_count = 0;
+  let entity_count = 0;
+  let pending_ingestion = 0;
+
+  if (pitstopUrl && pitstopKey) {
+    try {
+      const { createClient: mk } = await import('@supabase/supabase-js');
+      const sb = mk(pitstopUrl, pitstopKey);
+      const [{ count: kc }, { count: ec }, { count: pc }] = await Promise.all([
+        sb.from('extracted_knowledge').select('*', { count: 'exact', head: true }),
+        sb.from('extracted_knowledge').select('*', { count: 'exact', head: true }).not('entity_objects', 'is', null).neq('entity_objects', '[]'),
+        sb.from('ingested_content').select('*', { count: 'exact', head: true }).eq('processing_status', 'pending'),
+      ]);
+      knowledge_count = kc ?? 0;
+      entity_count = ec ?? 0;
+      pending_ingestion = pc ?? 0;
+    } catch { /* non-fatal */ }
+  }
+
   res.json({
     status: 'ok',
-    timestamp: new Date().toISOString(),
-    version: '2.0.0',
+    knowledge_count,
+    entity_count,
+    pending_ingestion,
+    last_heartbeat: lastHeartbeatAt,
+    uptime: 'ok',
     services: {
       anthropic: key('ANTHROPIC_API_KEY'),
       groq: key('GROQ_API_KEY'),
@@ -868,18 +895,18 @@ async function runEntityBackfill(): Promise<{ processed: number; remaining: numb
   const supabase = mkSupabase(pitstopUrl, pitstopKey);
   const anthropic = new AnthropicSDK({ apiKey: anthropicKey });
 
-  // Match both NULL and empty array '{}'
+  // Match both NULL and empty array for entity_objects
   const { data: rows, error } = await supabase
     .from('extracted_knowledge')
     .select('id, content')
-    .or('entities.is.null,entities.eq.{}')
+    .or('entity_objects.is.null,entity_objects.eq.[]')
     .limit(10);
 
   if (error || !rows || rows.length === 0) {
     const { count } = await supabase
       .from('extracted_knowledge')
       .select('*', { count: 'exact', head: true })
-      .or('entities.is.null,entities.eq.{}');
+      .or('entity_objects.is.null,entity_objects.eq.[]');
     return { processed: 0, remaining: count ?? 0 };
   }
 
@@ -919,7 +946,7 @@ async function runEntityBackfill(): Promise<{ processed: number; remaining: numb
   const { count: remaining } = await supabase
     .from('extracted_knowledge')
     .select('*', { count: 'exact', head: true })
-    .or('entities.is.null,entities.eq.{}');
+    .or('entity_objects.is.null,entity_objects.eq.[]');
 
   return { processed, remaining: remaining ?? 0 };
 }
@@ -939,22 +966,58 @@ app.post('/backfill-entities', async (_req: Request, res: Response) => {
 app.get('/heartbeat', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
-  const result: Record<string, unknown> = { ts: new Date().toISOString() };
+  const ts = new Date().toISOString();
+  lastHeartbeatAt = ts;
+  const result: Record<string, unknown> = { ts };
 
   if (pitstopUrl && pitstopKey) {
     try {
       const { createClient: mkSupabase } = await import('@supabase/supabase-js');
       const supabase = mkSupabase(pitstopUrl, pitstopKey);
-      const { count } = await supabase
-        .from('extracted_knowledge')
-        .select('*', { count: 'exact', head: true })
-        .or('entities.is.null,entities.eq.{}');
-      result.entities_missing = count ?? 0;
-      if ((count ?? 0) > 0) {
-        console.log(`[heartbeat] ${count} records need entity backfill — running...`);
-        const backfill = await runEntityBackfill();
+
+      // Quality check: counts
+      const [
+        { count: knowledgeCount },
+        { count: entityObjCount },
+        { count: emptyEntityObj },
+        { count: pendingCount },
+      ] = await Promise.all([
+        supabase.from('extracted_knowledge').select('*', { count: 'exact', head: true }),
+        supabase.from('extracted_knowledge').select('*', { count: 'exact', head: true }).not('entity_objects', 'is', null).neq('entity_objects', '[]'),
+        supabase.from('extracted_knowledge').select('*', { count: 'exact', head: true }).or('entity_objects.is.null,entity_objects.eq.[]'),
+        supabase.from('ingested_content').select('*', { count: 'exact', head: true }).eq('processing_status', 'pending'),
+      ]);
+
+      result.knowledge_count = knowledgeCount ?? 0;
+      result.entity_count = entityObjCount ?? 0;
+      result.entity_objects_missing = emptyEntityObj ?? 0;
+      result.pending_ingestion = pendingCount ?? 0;
+
+      // Auto-backfill entity_objects if needed
+      let backfill = null;
+      if ((emptyEntityObj ?? 0) > 0) {
+        console.log(`[heartbeat] ${emptyEntityObj} records need entity_objects backfill — running...`);
+        backfill = await runEntityBackfill();
         result.backfill = backfill;
         console.log(`[heartbeat] backfill done: processed=${backfill.processed} remaining=${backfill.remaining}`);
+      }
+
+      // Telegram status report
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (token && chatId) {
+        const pendingLine = (pendingCount ?? 0) > 0 ? `\n⚠️ Pending: ${pendingCount}` : '';
+        const backfillLine = backfill ? `\n🔧 Backfill: +${backfill.processed} (осталось ${backfill.remaining})` : '';
+        const text = `🫀 Heartbeat: ${knowledgeCount ?? 0} знаний, ${entityObjCount ?? 0} с entities, ${emptyEntityObj ?? 0} без данных.${pendingLine}${backfillLine}\nСистема работает.`;
+        try {
+          await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text }),
+          });
+        } catch (tgErr) {
+          console.error('[heartbeat] Telegram failed:', tgErr instanceof Error ? tgErr.message : String(tgErr));
+        }
       }
     } catch (e) {
       result.error = e instanceof Error ? e.message : String(e);
