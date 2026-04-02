@@ -14,18 +14,16 @@ Each insight must be actionable or strategically valuable.
 Be CONCISE. Maximum 2 sentences per insight.
 business_value: 1 sentence only.
 Output ONLY valid JSON. No markdown, no commentary.
-STRICT CALIBRATION:
-- immediate_relevance (r) 0.7+ ONLY if it DIRECTLY solves a CURRENT ACTIVE task listed in context. Generic AI knowledge = max 0.5 even if related to our projects. Must reference a SPECIFIC current need, not just general topic.
-- Default range: 0.3-0.5 for most content.
-- 0.6-0.7 only if mentions specific tool/method we plan to use.
-- Below 0.3 for content outside our domains entirely.
-- strategic_relevance (s) 0.7+ means: directly in our knowledge_domains with high priority
-- strategic_relevance 0.3-0.6 means: tangentially related to our domains
-- Target: 15-20% of items as hot (r>=0.7). If scoring more than 2 items above 0.7, recalibrate DOWN.
-- STRICT: r=0.7+ means we can act on this THIS WEEK with the current codebase. r=0.0-0.2 for content unrelated to our stack.
-IDEAS: When an item has r>=0.7 (hot), its content must be an ACTIONABLE STEP, not a copy of the knowledge fact. BAD: "Sentry — real-time error tracking with stack traces". GOOD: "Install Sentry for Runner and Intake error monitoring — free tier sufficient, priority after Railway migration."
+CALIBRATION (immediate_relevance r):
+0.8-1.0 = решает КОНКРЕТНУЮ задачу ЭТОЙ НЕДЕЛИ из active tasks
+0.6-0.7 = применимо к нашему стеку, можем внедрить в этом цикле
+0.4-0.5 = полезно стратегически, не срочно
+0.2-0.3 = интересно, далёкий backlog
+0.0-0.1 = не имеет отношения к нам
+Если больше 2 items выше 0.7 — пересмотри вниз.
+IDEAS: hot items (r>=0.6) формулируй как ДЕЙСТВИЕ, не как факт. BAD: "Sentry — real-time error tracking". GOOD: "Установить Sentry для мониторинга ошибок Runner".
 RESOURCES: If the content mentions specific tools, services, or repositories — add one extra item with t="tool" and content = name + URL (if available) + one sentence what it does. Only for concrete tools, not generic concepts.
-ENTITIES: e[] and eo[] must contain PROPER NOUNS only — tool names, project names, companies, people. NOT generic terms like "serverless functions", "payment processing", "error handling", "API design".
+ENTITIES: e[] and eo[] — ONLY proper nouns: tool/project/company/person names. NOT: "error handling", "batch processing", "serverless functions", "API design".
 BATCH MODE: If the text contains multiple separate posts/messages (separated by ---, ===, or double newline + numbering), analyze EACH post separately. Extract insights from EACH post independently. Small posts may have 1-2 insights, large posts 5-8.`;
 
 async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promise<void> {
