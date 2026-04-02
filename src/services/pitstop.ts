@@ -236,6 +236,7 @@ export async function saveExtractedKnowledge(
       business_value: item.business_value ?? null,
       tags: item.tags,
       entities: item.tags.length > 0 ? item.tags : null,
+      entity_objects: item.entity_objects && item.entity_objects.length > 0 ? item.entity_objects : null,
       routed_to: [item.routed_to],
       language: null,
       source_url: sourceUrl,

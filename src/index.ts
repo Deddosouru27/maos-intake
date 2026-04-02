@@ -888,21 +888,28 @@ async function runEntityBackfill(): Promise<{ processed: number; remaining: numb
     try {
       const msg = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 100,
+        max_tokens: 150,
         messages: [{
           role: 'user',
-          content: `Extract named entities (tools, companies, products, people) from this text. Return ONLY a JSON array, max 5 items: ["Entity1","Entity2"]\n\n${row.content.slice(0, 500)}`,
+          content: `Extract named entities from this text. For each, classify as tool, project, concept, or person. Return ONLY JSON: {"e":["Name1","Name2"],"eo":[{"n":"Name1","t":"tool"}]}\n\n${row.content.slice(0, 500)}`,
         }],
       });
-      const raw = msg.content[0].type === 'text' ? msg.content[0].text.trim() : '[]';
-      const match = raw.match(/\[[\s\S]*?\]/);
-      if (match) {
-        const entities = JSON.parse(match[0]) as string[];
-        const { error: upErr } = await supabase
-          .from('extracted_knowledge')
-          .update({ entities })
-          .eq('id', row.id);
-        if (!upErr) processed++;
+      const raw = msg.content[0].type === 'text' ? msg.content[0].text.trim() : '{}';
+      const objMatch = raw.match(/\{[\s\S]*?\}/);
+      if (objMatch) {
+        try {
+          const parsed = JSON.parse(objMatch[0]) as { e?: string[]; eo?: { n: string; t: string }[] };
+          const entities = parsed.e ?? [];
+          const entity_objects = (parsed.eo ?? []).map((o) => ({
+            name: o.n,
+            type: ['tool', 'project', 'concept', 'person'].includes(o.t) ? o.t : 'concept',
+          }));
+          const { error: upErr } = await supabase
+            .from('extracted_knowledge')
+            .update({ entities, entity_objects })
+            .eq('id', row.id);
+          if (!upErr) processed++;
+        } catch { /* skip malformed */ }
       }
     } catch (e) {
       console.error('[backfill-entities] row', row.id, e instanceof Error ? e.message : String(e));

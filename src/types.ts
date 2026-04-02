@@ -28,6 +28,13 @@ export type KnowledgeType =
 export type EffortLevel = 'trivial' | 'low' | 'medium' | 'high' | 'huge';
 export type RoutedTo = 'hot_backlog' | 'knowledge_base' | 'discarded';
 
+export type EntityType = 'tool' | 'project' | 'concept' | 'person';
+
+export interface EntityObject {
+  name: string;
+  type: EntityType;
+}
+
 export interface KnowledgeItem {
   content: string;
   knowledge_type: KnowledgeType;
@@ -41,6 +48,7 @@ export interface KnowledgeItem {
   has_ready_code: boolean;
   business_value: string | null;
   tags: string[];
+  entity_objects?: EntityObject[];
 }
 
 export interface RoutedKnowledgeItem extends KnowledgeItem {

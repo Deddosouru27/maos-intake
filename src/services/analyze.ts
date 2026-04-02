@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel } from '../types';
+import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel, EntityObject } from '../types';
 import { getFullContext, buildContextString } from './projectContext';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -88,6 +88,7 @@ interface CompactItem {
   s: number;
   r: number;
   e?: string[];
+  eo?: { n: string; t: string }[];
 }
 
 interface CompactResponse {
@@ -118,6 +119,10 @@ function expandCompactResponse(parsed: CompactResponse): BrainAnalysis {
       effort: 'medium' as EffortLevel,
       has_ready_code: false,
       tags: item.e ?? [],
+      entity_objects: (item.eo ?? []).map((o) => ({
+        name: o.n,
+        type: (['tool', 'project', 'concept', 'person'].includes(o.t) ? o.t : 'concept') as EntityObject['type'],
+      })),
     };
   });
 
@@ -227,7 +232,8 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
       "b": "Business value. 1 sentence.",
       "s": 0.7,
       "r": 0.5,
-      "e": ["EntityName", "ToolName"]
+      "e": ["EntityName", "ToolName"],
+      "eo": [{"n": "EntityName", "t": "tool|project|concept|person"}]
     }
   ],
   "summary": "3 sentence summary of entire content.",
