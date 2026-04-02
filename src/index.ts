@@ -963,6 +963,79 @@ app.post('/backfill-entities', async (_req: Request, res: Response) => {
   res.json(result);
 });
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function runAutoDiscover(topics: string[], supabase: any): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+
+  for (const topic of topics) {
+    try {
+      const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(topic)}&sp=CAI`;
+      const jinaResp = await fetch('https://r.jina.ai/' + searchUrl, {
+        headers: { Accept: 'text/plain' },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!jinaResp.ok) { counts[topic] = 0; continue; }
+      const text = await jinaResp.text();
+
+      // Extract YouTube video URLs and titles from Jina plain-text output
+      // Lines look like: [Title](https://www.youtube.com/watch?v=xxx)
+      const linkRegex = /\[([^\]]+)\]\((https:\/\/www\.youtube\.com\/watch\?v=[^)]+)\)/g;
+      const rows: { url: string; title: string; source: string; topic: string; status: string }[] = [];
+      let match: RegExpExecArray | null;
+      const seen = new Set<string>();
+      while ((match = linkRegex.exec(text)) !== null && rows.length < 10) {
+        const title = match[1].trim();
+        const url = match[2].trim();
+        if (seen.has(url)) continue;
+        seen.add(url);
+        rows.push({ url, title, source: 'youtube', topic, status: 'pending' });
+      }
+
+      if (rows.length === 0) { counts[topic] = 0; continue; }
+
+      // Upsert — skip already-known URLs
+      const { data: existing } = await supabase
+        .from('content_discovery')
+        .select('url')
+        .in('url', rows.map((r) => r.url));
+      const existingUrls = new Set((existing ?? []).map((r: { url: string }) => r.url));
+      const newRows = rows.filter((r) => !existingUrls.has(r.url));
+
+      if (newRows.length > 0) {
+        await supabase.from('content_discovery').insert(newRows);
+      }
+      counts[topic] = newRows.length;
+      console.log(`[auto-discover] topic="${topic}" found ${rows.length}, inserted ${newRows.length} new`);
+    } catch (e) {
+      console.error(`[auto-discover] topic="${topic}" failed:`, e instanceof Error ? e.message : String(e));
+      counts[topic] = 0;
+    }
+  }
+
+  return counts;
+}
+
+interface AutoDiscoverBody { topics: string[] }
+
+app.post('/auto-discover', async (req: Request, res: Response) => {
+  const { topics } = req.body as AutoDiscoverBody;
+  if (!Array.isArray(topics) || topics.length === 0) {
+    res.status(400).json({ error: 'topics[] required' });
+    return;
+  }
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+  const { createClient: mkSupabase } = await import('@supabase/supabase-js');
+  const supabase = mkSupabase(pitstopUrl, pitstopKey);
+  const counts = await runAutoDiscover(topics.slice(0, 10), supabase);
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  res.json({ discovered: total, by_topic: counts });
+});
+
 app.get('/heartbeat', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
@@ -1021,13 +1094,45 @@ app.get('/heartbeat', async (_req: Request, res: Response) => {
         status: 'done',
       });
 
+      // Auto-discover once per day (track via agent_action_log)
+      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      const { count: todayDiscover } = await supabase
+        .from('agent_action_log')
+        .select('*', { count: 'exact', head: true })
+        .eq('agent', 'heartbeat')
+        .eq('action', 'auto_discover')
+        .gte('created_at', today + 'T00:00:00Z');
+      if ((todayDiscover ?? 0) === 0) {
+        try {
+          const { data: domains } = await supabase
+            .from('knowledge_domains')
+            .select('name')
+            .eq('is_active', true)
+            .limit(5);
+          const topics = (domains ?? []).map((d: { name: string }) => d.name);
+          if (topics.length > 0) {
+            const discovered = await runAutoDiscover(topics, supabase);
+            result.auto_discover = discovered;
+            await supabase.from('agent_action_log').insert({
+              agent: 'heartbeat',
+              action: 'auto_discover',
+              details: { topics, discovered },
+              status: 'done',
+            });
+          }
+        } catch (adErr) {
+          console.error('[heartbeat] auto-discover failed:', adErr instanceof Error ? adErr.message : String(adErr));
+        }
+      }
+
       // Telegram status report
       const token = process.env.TELEGRAM_BOT_TOKEN;
       const chatId = process.env.TELEGRAM_CHAT_ID;
       if (token && chatId) {
         const pendingLine = (pendingCount ?? 0) > 0 ? `\n⚠️ Pending: ${pendingCount}` : '';
         const backfillLine = backfill ? `\n🔧 Backfill: +${backfill.processed} (осталось ${backfill.remaining})` : '';
-        const text = `🫀 Heartbeat: ${knowledgeCount ?? 0} знаний, ${entityObjCount ?? 0} с entities, ${emptyEntityObj ?? 0} без данных.${pendingLine}${backfillLine}\nСистема работает.`;
+        const discoverLine = result.auto_discover ? `\n🔍 Найдено: ${JSON.stringify(result.auto_discover)}` : '';
+        const text = `🫀 Heartbeat: ${knowledgeCount ?? 0} знаний, ${entityObjCount ?? 0} с entities, ${emptyEntityObj ?? 0} без данных.${pendingLine}${backfillLine}${discoverLine}\nСистема работает.`;
         try {
           await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
             method: 'POST',
