@@ -1000,7 +1000,26 @@ app.get('/heartbeat', async (_req: Request, res: Response) => {
         backfill = await runEntityBackfill();
         result.backfill = backfill;
         console.log(`[heartbeat] backfill done: processed=${backfill.processed} remaining=${backfill.remaining}`);
+        await supabase.from('agent_action_log').insert({
+          agent: 'heartbeat',
+          action: 'entity_backfill',
+          details: { processed: backfill.processed, remaining: backfill.remaining },
+          status: 'done',
+        });
       }
+
+      // Log health check
+      await supabase.from('agent_action_log').insert({
+        agent: 'heartbeat',
+        action: 'health_check',
+        details: {
+          knowledge_count: knowledgeCount ?? 0,
+          entity_count: entityObjCount ?? 0,
+          pending: pendingCount ?? 0,
+          timestamp: ts,
+        },
+        status: 'done',
+      });
 
       // Telegram status report
       const token = process.env.TELEGRAM_BOT_TOKEN;
