@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { createHash } from 'crypto';
 import express, { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
+import { createClient } from '@supabase/supabase-js';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent, analyzeWithChunking } from './services/analyze';
@@ -11,6 +12,26 @@ import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
 import { getFullContext } from './services/projectContext';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, RoutedTo } from './types';
+
+async function writeIntakeLog(fields: {
+  url: string;
+  stage: string;
+  haiku_items?: number;
+  saved_items?: number;
+  dedup_skipped?: number;
+  smart_crud_updates?: number;
+  duration_ms?: number;
+  error?: string | null;
+}): Promise<void> {
+  const url = process.env.PITSTOP_SUPABASE_URL;
+  const key = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!url || !key) return;
+  try {
+    await createClient(url, key).from('intake_logs').insert(fields);
+  } catch (e) {
+    console.error('[intake_logs] write failed:', e instanceof Error ? e.message : String(e));
+  }
+}
 
 const app = express();
 app.use((req, res, next) => {
@@ -166,7 +187,7 @@ async function runPipeline(
   sourceUrl: string,
   sourceType: string,
   contentHash: string,
-): Promise<{ notification: string; haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number; haikuRaw: string | null }> {
+): Promise<{ notification: string; haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number; smartCrudUpdates: number; haikuRaw: string | null }> {
   // Guide detection
   const guidePattern = /guide|tutorial|step-by-step|how to|гайд|инструкция/i;
   const isGuide = guidePattern.test(analysis.summary);
@@ -216,11 +237,13 @@ async function runPipeline(
   console.log('[PIPELINE] saving extracted_knowledge...');
   let knowledgeSaved: { id: string; content: string }[] = [];
   let dedupSkipped = 0;
+  let smartCrudUpdates = 0;
   try {
     const result = await saveExtractedKnowledge(itemsToSave, ingestedId, sourceUrl, sourceType);
     knowledgeSaved = result.saved;
     dedupSkipped = result.dedupSkipped;
-    console.log('[PIPELINE] extracted_knowledge ok:', knowledgeSaved.length, 'saved,', dedupSkipped, 'dedup skipped');
+    smartCrudUpdates = result.smartCrudUpdates;
+    console.log('[PIPELINE] extracted_knowledge ok:', knowledgeSaved.length, 'saved,', dedupSkipped, 'dedup skipped,', smartCrudUpdates, 'updated');
   } catch (e) {
     console.error('[PIPELINE] extracted_knowledge failed:', e instanceof Error ? e.message : String(e));
   }
@@ -239,17 +262,19 @@ async function runPipeline(
     itemsToSave: itemsToSave.length,
     savedItems: knowledgeSaved.length,
     dedupSkipped,
+    smartCrudUpdates,
     haikuRaw: null,
   };
 }
 
-interface PipelineDiag { haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number; haikuRaw: string | null }
+interface PipelineDiag { haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number; smartCrudUpdates: number; haikuRaw: string | null }
 async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis; diag: PipelineDiag } | { duplicate: true } | { youtube_unavailable: true }> {
   // 45s hard timeout — Vercel maxDuration is 60s, leaves buffer for network
   const timeoutId = setTimeout(() => {
     throw new Error('[INTAKE] Pipeline timeout (45s)');
   }, 45000);
 
+  const startTime = Date.now();
   try {
     console.log('[PIPELINE] Starting for URL:', url, '| source:', source);
 
@@ -269,6 +294,7 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
       console.log('[PIPELINE] URL dedup check — recent done rows:', recent?.length ?? 0, dedupErr ? `err: ${dedupErr.message}` : 'ok');
       if (recent && recent.length > 0) {
         console.log('[PIPELINE] URL dedup HIT — skipping:', url);
+        await writeIntakeLog({ url, stage: 'dedup_skip', duration_ms: Date.now() - startTime });
         return { duplicate: true };
       }
     } else {
@@ -288,7 +314,7 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
 
     if (rawText.length < 30) {
       console.error('[PIPELINE] Content too short or empty — aborting, rawText:', JSON.stringify(rawText));
-      return { notification: '⚠️ Контент не получен (пустой ответ от источника)', analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'empty', language: 'other' }, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, haikuRaw: null } };
+      return { notification: '⚠️ Контент не получен (пустой ответ от источника)', analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'empty', language: 'other' }, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, smartCrudUpdates: 0, haikuRaw: null } };
     }
 
     const contentHash = computeHash(rawText);
@@ -337,11 +363,21 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
       if (ingestedId) {
         await updateIngestedDone(ingestedId, analysis, 'parse_error', 0, false, 'parse_error');
       }
-      return { notification: '⚠️ Haiku вернул не-JSON. Записано как parse_error.', analysis, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, haikuRaw: analysis._haiku_raw ?? null } };
+      await writeIntakeLog({ url, stage: 'parse_error', haiku_items: 0, duration_ms: Date.now() - startTime, error: 'Haiku returned non-JSON' });
+      return { notification: '⚠️ Haiku вернул не-JSON. Записано как parse_error.', analysis, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, smartCrudUpdates: 0, haikuRaw: analysis._haiku_raw ?? null } };
     }
 
     const diag = await runPipeline(ingestedId, analysis, url, source, contentHash);
-    console.log(`[INTAKE] 7. Done — ${diag.notification} | haiku:${diag.haikuItems} itemsToSave:${diag.itemsToSave} saved:${diag.savedItems} dedup:${diag.dedupSkipped}`);
+    console.log(`[INTAKE] 7. Done — ${diag.notification} | haiku:${diag.haikuItems} itemsToSave:${diag.itemsToSave} saved:${diag.savedItems} dedup:${diag.dedupSkipped} updates:${diag.smartCrudUpdates}`);
+    await writeIntakeLog({
+      url,
+      stage: 'complete',
+      haiku_items: diag.haikuItems,
+      saved_items: diag.savedItems,
+      dedup_skipped: diag.dedupSkipped,
+      smart_crud_updates: diag.smartCrudUpdates,
+      duration_ms: Date.now() - startTime,
+    });
     return { notification: diag.notification, analysis, diag };
   } finally {
     clearTimeout(timeoutId);

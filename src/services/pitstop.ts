@@ -164,15 +164,15 @@ export async function saveExtractedKnowledge(
   ingestedContentId: string | null,
   sourceUrl: string,
   sourceType: string,
-): Promise<{ saved: { id: string; content: string }[]; dedupSkipped: number }> {
-  if (items.length === 0) return { saved: [], dedupSkipped: 0 };
+): Promise<{ saved: { id: string; content: string }[]; dedupSkipped: number; smartCrudUpdates: number }> {
+  if (items.length === 0) return { saved: [], dedupSkipped: 0, smartCrudUpdates: 0 };
 
   let supabase;
   try {
     supabase = getClient();
   } catch (err) {
     console.error('[pitstop] knowledge client init failed:', err);
-    return { saved: [], dedupSkipped: 0 };
+    return { saved: [], dedupSkipped: 0, smartCrudUpdates: 0 };
   }
 
   console.log('[SAVE] Items count:', items?.length);
@@ -180,6 +180,7 @@ export async function saveExtractedKnowledge(
 
   const saved: { id: string; content: string }[] = [];
   let dedupSkipped = 0;
+  let smartCrudUpdates = 0;
   const hasEmbedding = !!process.env.OPENAI_API_KEY;
 
   type SimilarRow = { id: string; content: string; similarity: number };
@@ -255,6 +256,7 @@ export async function saveExtractedKnowledge(
 
       const newRow = insertedData as { id: string; content: string };
       saved.push(newRow);
+      smartCrudUpdates++;
 
       // Mark old as superseded
       await supabase
@@ -309,8 +311,8 @@ export async function saveExtractedKnowledge(
     }
   }
 
-  console.log(`[INTAKE] extracted_knowledge: ${saved.length} saved, ${dedupSkipped} skipped`);
-  return { saved, dedupSkipped };
+  console.log(`[INTAKE] extracted_knowledge: ${saved.length} saved, ${dedupSkipped} skipped, ${smartCrudUpdates} updated`);
+  return { saved, dedupSkipped, smartCrudUpdates };
 }
 
 export async function saveToPitstop(
