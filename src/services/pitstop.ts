@@ -191,28 +191,29 @@ export async function saveExtractedKnowledge(
     let action: 'ADD' | 'UPDATE' | 'NONE' = 'ADD';
     let existingRow: SimilarRow | null = null;
 
+    console.log(`[SMART_CRUD] New: ${item.content.slice(0, 80)}`);
+
     if (embedding) {
       const { data: similar } = await supabase.rpc('match_knowledge', {
         query_embedding: embedding,
         match_count: 3,
-        similarity_threshold: 0.85,
+        similarity_threshold: 0.75,
       });
       const matches = (similar ?? []) as SimilarRow[];
+      const top = matches.length > 0 ? matches[0] : null;
+      console.log(`[SMART_CRUD] Best match sim: ${top ? top.similarity.toFixed(3) : 'none'}`);
 
-      if (matches.length > 0) {
-        const top = matches[0];
+      if (top) {
         if (top.similarity >= 0.97) {
-          // Exact duplicate — skip
-          console.log(`[CRUD] NONE (exact dup sim:${top.similarity.toFixed(3)}): ${item.content.slice(0, 50)}`);
           action = 'NONE';
         } else {
-          // Fuzzy match — ask Haiku
           existingRow = top;
           action = await askHaikuCrudDecision(top.content, item.content);
-          console.log(`[CRUD] Haiku decision=${action} sim:${top.similarity.toFixed(3)}: ${item.content.slice(0, 50)}`);
         }
       }
     }
+
+    console.log(`[SMART_CRUD] Decision: ${action}`);
 
     if (action === 'NONE') {
       dedupSkipped++;

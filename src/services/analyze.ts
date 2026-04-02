@@ -198,6 +198,7 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
   const trimmedContext = buildContextString(context);
 
   const maxItems = trimmedText.length < 3000 ? 8 : 5;
+  console.log(`[ANALYZE] text length: ${trimmedText.length} chars → maxItems: ${maxItems}`);
 
   const userPrompt = `Content to analyze:
 """
