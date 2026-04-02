@@ -857,38 +857,30 @@ app.get('/quality-report', async (_req: Request, res: Response) => {
   });
 });
 
-app.post('/backfill-entities', async (_req: Request, res: Response) => {
+async function runEntityBackfill(): Promise<{ processed: number; remaining: number }> {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  if (!pitstopUrl || !pitstopKey || !anthropicKey) {
-    res.status(500).json({ error: 'Missing env vars' });
-    return;
-  }
+  if (!pitstopUrl || !pitstopKey || !anthropicKey) return { processed: 0, remaining: 0 };
 
-  const { createClient } = await import('@supabase/supabase-js');
+  const { createClient: mkSupabase } = await import('@supabase/supabase-js');
   const AnthropicSDK = (await import('@anthropic-ai/sdk')).default;
-  const supabase = createClient(pitstopUrl, pitstopKey);
+  const supabase = mkSupabase(pitstopUrl, pitstopKey);
   const anthropic = new AnthropicSDK({ apiKey: anthropicKey });
 
+  // Match both NULL and empty array '{}'
   const { data: rows, error } = await supabase
     .from('extracted_knowledge')
     .select('id, content')
-    .is('entities', null)
+    .or('entities.is.null,entities.eq.{}')
     .limit(10);
 
-  if (error) {
-    res.status(500).json({ error: error.message });
-    return;
-  }
-
-  if (!rows || rows.length === 0) {
+  if (error || !rows || rows.length === 0) {
     const { count } = await supabase
       .from('extracted_knowledge')
       .select('*', { count: 'exact', head: true })
-      .is('entities', null);
-    res.json({ processed: 0, remaining: count ?? 0 });
-    return;
+      .or('entities.is.null,entities.eq.{}');
+    return { processed: 0, remaining: count ?? 0 };
   }
 
   let processed = 0;
@@ -920,9 +912,50 @@ app.post('/backfill-entities', async (_req: Request, res: Response) => {
   const { count: remaining } = await supabase
     .from('extracted_knowledge')
     .select('*', { count: 'exact', head: true })
-    .is('entities', null);
+    .or('entities.is.null,entities.eq.{}');
 
-  res.json({ processed, remaining: remaining ?? 0 });
+  return { processed, remaining: remaining ?? 0 };
+}
+
+app.post('/backfill-entities', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!pitstopUrl || !pitstopKey || !anthropicKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+  const result = await runEntityBackfill();
+  res.json(result);
+});
+
+app.get('/heartbeat', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  const result: Record<string, unknown> = { ts: new Date().toISOString() };
+
+  if (pitstopUrl && pitstopKey) {
+    try {
+      const { createClient: mkSupabase } = await import('@supabase/supabase-js');
+      const supabase = mkSupabase(pitstopUrl, pitstopKey);
+      const { count } = await supabase
+        .from('extracted_knowledge')
+        .select('*', { count: 'exact', head: true })
+        .or('entities.is.null,entities.eq.{}');
+      result.entities_missing = count ?? 0;
+      if ((count ?? 0) > 0) {
+        console.log(`[heartbeat] ${count} records need entity backfill — running...`);
+        const backfill = await runEntityBackfill();
+        result.backfill = backfill;
+        console.log(`[heartbeat] backfill done: processed=${backfill.processed} remaining=${backfill.remaining}`);
+      }
+    } catch (e) {
+      result.error = e instanceof Error ? e.message : String(e);
+      console.error('[heartbeat] error:', result.error);
+    }
+  }
+
+  res.json(result);
 });
 
 // Local dev only — Vercel handles listening in serverless
