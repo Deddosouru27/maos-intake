@@ -86,11 +86,13 @@ interface CompactItem {
   b: string;
   s: number;
   r: number;
+  e?: string[];
 }
 
 interface CompactResponse {
   items: CompactItem[];
   summary: string;
+  entities?: string[];
 }
 
 function expandCompactResponse(parsed: CompactResponse): BrainAnalysis {
@@ -114,7 +116,7 @@ function expandCompactResponse(parsed: CompactResponse): BrainAnalysis {
       novelty: 0.5,
       effort: 'medium' as EffortLevel,
       has_ready_code: false,
-      tags: [],
+      tags: item.e ?? [],
     };
   });
 
@@ -135,6 +137,7 @@ function expandCompactResponse(parsed: CompactResponse): BrainAnalysis {
     priority_reason: '',
     category: 'other',
     language: 'other',
+    entities: parsed.entities ?? [],
   };
 }
 
@@ -217,10 +220,12 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
       "c": "Insight content. Max 2 sentences.",
       "b": "Business value. 1 sentence.",
       "s": 0.7,
-      "r": 0.5
+      "r": 0.5,
+      "e": ["EntityName", "ToolName"]
     }
   ],
-  "summary": "3 sentence summary of entire content."
+  "summary": "3 sentence summary of entire content.",
+  "entities": ["Supabase", "Claude Code", "MAOS"]
 }`;
 
   const message = await client.messages.create({
