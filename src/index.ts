@@ -330,8 +330,24 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     console.log('[PIPELINE] 4. Context ok — projects:', context.projects.length, 'domains:', context.domains.length, 'recentHashes:', context.recentHashes.length);
 
     if (context.recentHashes.includes(contentHash)) {
-      console.log('[PIPELINE] Content hash dedup HIT:', contentHash.slice(0, 8), '— skipping');
+      console.log('[PIPELINE] Content hash dedup HIT (cache):', contentHash.slice(0, 8));
+      await writeIntakeLog({ url, stage: 'dedup_skip', duration_ms: Date.now() - startTime });
       return { duplicate: true };
+    }
+    // DB fallback — cache only holds last 100 done records
+    if (pitstopUrl && pitstopKey) {
+      const sb = mkClient(pitstopUrl, pitstopKey);
+      const { data: hashRow } = await sb
+        .from('ingested_content')
+        .select('id')
+        .eq('content_hash', contentHash)
+        .eq('processing_status', 'done')
+        .limit(1);
+      if (hashRow && hashRow.length > 0) {
+        console.log('[PIPELINE] Content hash dedup HIT (DB):', contentHash.slice(0, 8));
+        await writeIntakeLog({ url, stage: 'dedup_skip', duration_ms: Date.now() - startTime });
+        return { duplicate: true };
+      }
     }
 
     // YouTube dedup by video ID (hash may differ due to caption format changes)
@@ -398,6 +414,28 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
     const sourceType = (bodySourceType && bodySourceType !== 'link') ? bodySourceType : 'text';
     const label = `manual:${title.slice(0, 50)}`;
 
+    // Batch split: "---" or "===" on its own line
+    const batchParts = rawText.split(/\n---\n|\n===\n/).map((s) => s.trim()).filter((s) => s.length >= 30);
+    if (batchParts.length > 1) {
+      console.log(`[/process manual] batch split: ${batchParts.length} parts`);
+      const batchResults: { notification: string; items: number }[] = [];
+      const batchErrors: { index: number; error: string }[] = [];
+      for (let i = 0; i < Math.min(batchParts.length, 10); i++) {
+        try {
+          const r = await rawTextPipeline(batchParts[i], sourceType, `${label}:part${i + 1}`, title);
+          if ('duplicate' in r) {
+            batchResults.push({ notification: '♻️ duplicate', items: 0 });
+          } else {
+            batchResults.push({ notification: r.notification, items: r.analysis.knowledge_items.length });
+          }
+        } catch (e) {
+          batchErrors.push({ index: i, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      res.json({ status: 'batch', parts: batchParts.length, results: batchResults, errors: batchErrors });
+      return;
+    }
+
     try {
       const result = await rawTextPipeline(rawText, sourceType, label, title);
       if ('duplicate' in result) {
@@ -450,8 +488,23 @@ async function rawTextPipeline(
 
   const context = await getFullContext();
   if (context.recentHashes.includes(contentHash)) {
-    console.log('[INTAKE] Duplicate content, skipping');
+    console.log('[INTAKE] Content hash dedup HIT (cache):', contentHash.slice(0, 8));
     return { duplicate: true };
+  }
+  // DB fallback — cache only holds last 100 done records
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (pitstopUrl && pitstopKey) {
+    const { data: hashRow } = await createClient(pitstopUrl, pitstopKey)
+      .from('ingested_content')
+      .select('id')
+      .eq('content_hash', contentHash)
+      .eq('processing_status', 'done')
+      .limit(1);
+    if (hashRow && hashRow.length > 0) {
+      console.log('[INTAKE] Content hash dedup HIT (DB):', contentHash.slice(0, 8));
+      return { duplicate: true };
+    }
   }
 
   const ingestedId = await insertIngestedPending(rawText, label, sourceType, title, contentHash);
@@ -745,6 +798,129 @@ app.post('/backfill-embeddings', async (_req: Request, res: Response) => {
     .from('extracted_knowledge')
     .select('*', { count: 'exact', head: true })
     .is('embedding', null);
+
+  res.json({ processed, remaining: remaining ?? 0 });
+});
+
+app.get('/quality-report', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+  const { createClient } = await import('@supabase/supabase-js');
+  const supabase = createClient(pitstopUrl, pitstopKey);
+
+  const { count: totalCount } = await supabase
+    .from('extracted_knowledge')
+    .select('*', { count: 'exact', head: true });
+  const total = totalCount ?? 0;
+  const offset = total > 20 ? Math.floor(Math.random() * (total - 20)) : 0;
+
+  const { data: sample, error: sampleErr } = await supabase
+    .from('extracted_knowledge')
+    .select('id, content, immediate_relevance, strategic_relevance, knowledge_type, created_at, entities')
+    .order('created_at', { ascending: false })
+    .range(offset, offset + 19);
+
+  if (sampleErr) {
+    res.status(500).json({ error: sampleErr.message });
+    return;
+  }
+
+  const { data: allScores } = await supabase
+    .from('extracted_knowledge')
+    .select('immediate_relevance, strategic_relevance');
+
+  const scores = (allScores ?? []) as { immediate_relevance: number; strategic_relevance: number }[];
+  const hot = scores.filter((s) => s.immediate_relevance >= 0.7).length;
+  const mid = scores.filter((s) => s.immediate_relevance >= 0.4 && s.immediate_relevance < 0.7).length;
+  const low = scores.filter((s) => s.immediate_relevance < 0.4).length;
+  const avgImmediate = scores.length > 0 ? scores.reduce((a, s) => a + s.immediate_relevance, 0) / scores.length : 0;
+  const avgStrategic = scores.length > 0 ? scores.reduce((a, s) => a + s.strategic_relevance, 0) / scores.length : 0;
+  const highStrategic = scores.filter((s) => s.strategic_relevance >= 0.7).length;
+
+  res.json({
+    total_records: total,
+    sample_offset: offset,
+    sample: sample ?? [],
+    stats: {
+      hot_count: hot,
+      mid_count: mid,
+      low_count: low,
+      avg_immediate: parseFloat(avgImmediate.toFixed(3)),
+      avg_strategic: parseFloat(avgStrategic.toFixed(3)),
+      high_strategic_count: highStrategic,
+      hot_pct: scores.length > 0 ? parseFloat((hot / scores.length * 100).toFixed(1)) : 0,
+    },
+  });
+});
+
+app.post('/backfill-entities', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!pitstopUrl || !pitstopKey || !anthropicKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const { createClient } = await import('@supabase/supabase-js');
+  const AnthropicSDK = (await import('@anthropic-ai/sdk')).default;
+  const supabase = createClient(pitstopUrl, pitstopKey);
+  const anthropic = new AnthropicSDK({ apiKey: anthropicKey });
+
+  const { data: rows, error } = await supabase
+    .from('extracted_knowledge')
+    .select('id, content')
+    .is('entities', null)
+    .limit(10);
+
+  if (error) {
+    res.status(500).json({ error: error.message });
+    return;
+  }
+
+  if (!rows || rows.length === 0) {
+    const { count } = await supabase
+      .from('extracted_knowledge')
+      .select('*', { count: 'exact', head: true })
+      .is('entities', null);
+    res.json({ processed: 0, remaining: count ?? 0 });
+    return;
+  }
+
+  let processed = 0;
+  for (const row of rows as { id: string; content: string }[]) {
+    try {
+      const msg = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 100,
+        messages: [{
+          role: 'user',
+          content: `Extract named entities (tools, companies, products, people) from this text. Return ONLY a JSON array, max 5 items: ["Entity1","Entity2"]\n\n${row.content.slice(0, 500)}`,
+        }],
+      });
+      const raw = msg.content[0].type === 'text' ? msg.content[0].text.trim() : '[]';
+      const match = raw.match(/\[[\s\S]*?\]/);
+      if (match) {
+        const entities = JSON.parse(match[0]) as string[];
+        const { error: upErr } = await supabase
+          .from('extracted_knowledge')
+          .update({ entities })
+          .eq('id', row.id);
+        if (!upErr) processed++;
+      }
+    } catch (e) {
+      console.error('[backfill-entities] row', row.id, e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  const { count: remaining } = await supabase
+    .from('extracted_knowledge')
+    .select('*', { count: 'exact', head: true })
+    .is('entities', null);
 
   res.json({ processed, remaining: remaining ?? 0 });
 });

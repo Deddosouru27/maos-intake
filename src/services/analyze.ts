@@ -180,7 +180,7 @@ export async function analyzeWithChunking(text: string, source: string): Promise
     }
   }
 
-  return {
+  const aggregated: BrainAnalysis = {
     summary: firstSummary || `Обработано ${chunks.length} частей, извлечено ${allItems.length} знаний`,
     knowledge_items: allItems,
     overall_immediate: maxImmediate,
@@ -190,6 +190,12 @@ export async function analyzeWithChunking(text: string, source: string): Promise
     category: 'other',
     language: 'other',
   };
+
+  if (prioritySignal) {
+    await sendTelegramAlert(source, aggregated);
+  }
+
+  return aggregated;
 }
 
 export async function analyzeContent(text: string, source: string, isChunk = false): Promise<BrainAnalysis> {
@@ -268,7 +274,7 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
 
   const analysis = expandCompactResponse(compactTyped);
 
-  if (analysis.priority_signal) {
+  if (analysis.priority_signal && !isChunk) {
     await sendTelegramAlert(source, analysis);
   }
 
