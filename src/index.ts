@@ -118,31 +118,63 @@ function buildNotification(routed: RoutedKnowledgeItem[]): string {
 
 let lastHeartbeatAt: string | null = null;
 
-app.get('/health', async (_req: Request, res: Response) => {
+app.get('/health', async (req: Request, res: Response) => {
   const key = (name: string) => (process.env[name] ? 'connected' : 'missing_key');
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  const isPreflight = req.query.preflight === 'true';
 
   let knowledge_count = 0;
   let entity_count = 0;
   let pending_ingestion = 0;
+  let pending_tasks = 0;
+  let supabase_ok = false;
 
   if (pitstopUrl && pitstopKey) {
     try {
       const { createClient: mk } = await import('@supabase/supabase-js');
       const sb = mk(pitstopUrl, pitstopKey);
-      const [{ count: kc }, { count: ec }, { count: pc }] = await Promise.all([
+      const queries = [
         sb.from('extracted_knowledge').select('*', { count: 'exact', head: true }),
         sb.from('extracted_knowledge').select('*', { count: 'exact', head: true }).not('entity_objects', 'is', null).neq('entity_objects', '[]'),
         sb.from('ingested_content').select('*', { count: 'exact', head: true }).eq('processing_status', 'pending'),
-      ]);
-      knowledge_count = kc ?? 0;
-      entity_count = ec ?? 0;
-      pending_ingestion = pc ?? 0;
+      ] as const;
+      const base = await Promise.all(queries);
+      knowledge_count = base[0].count ?? 0;
+      entity_count = base[1].count ?? 0;
+      pending_ingestion = base[2].count ?? 0;
+      supabase_ok = true;
+
+      if (isPreflight) {
+        const { count: tc } = await sb.from('tasks').select('*', { count: 'exact', head: true }).not('status', 'in', '("done","cancelled")');
+        pending_tasks = tc ?? 0;
+      }
     } catch { /* non-fatal */ }
   }
 
-  res.json({
+  // Preflight: test Telegram connectivity
+  let telegram_ok: boolean | undefined;
+  if (isPreflight) {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+    if (token && chatId) {
+      try {
+        const tgResp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: '✅ Preflight check: Intake сервис работает.' }),
+          signal: AbortSignal.timeout(5000),
+        });
+        telegram_ok = tgResp.ok;
+      } catch {
+        telegram_ok = false;
+      }
+    } else {
+      telegram_ok = false;
+    }
+  }
+
+  const response: Record<string, unknown> = {
     status: 'ok',
     knowledge_count,
     entity_count,
@@ -155,7 +187,15 @@ app.get('/health', async (_req: Request, res: Response) => {
       pitstop_supabase: key('PITSTOP_SUPABASE_ANON_KEY'),
       memory_supabase: key('MEMORY_SUPABASE_ANON_KEY'),
     },
-  });
+  };
+
+  if (isPreflight) {
+    response.supabase = supabase_ok;
+    response.telegram = telegram_ok;
+    response.pending_tasks = pending_tasks;
+  }
+
+  res.json(response);
 });
 
 // Phase 1: fetch raw content (no analysis — allows dedup check before API call)
