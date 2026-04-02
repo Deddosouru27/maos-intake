@@ -1,8 +1,30 @@
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem } from '../types';
 
 const openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+async function askHaikuCrudDecision(existingContent: string, newContent: string): Promise<'ADD' | 'UPDATE' | 'NONE'> {
+  try {
+    const msg = await anthropicClient.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 10,
+      messages: [{
+        role: 'user',
+        content: `Старое знание: ${existingContent.slice(0, 200)}\nНовое знание: ${newContent.slice(0, 200)}\nРешение: ADD (разные вещи), UPDATE (новое заменяет старое), NONE (одно и то же). Ответь одним словом.`,
+      }],
+    });
+    const answer = (msg.content[0].type === 'text' ? msg.content[0].text : '').trim().toUpperCase();
+    if (answer.startsWith('UPDATE')) return 'UPDATE';
+    if (answer.startsWith('NONE')) return 'NONE';
+    return 'ADD';
+  } catch (err) {
+    console.error('[CRUD] Haiku decision failed:', err instanceof Error ? err.message : String(err));
+    return 'ADD';
+  }
+}
 
 async function getEmbedding(text: string): Promise<number[] | null> {
   try {
@@ -158,24 +180,43 @@ export async function saveExtractedKnowledge(
 
   const saved: { id: string; content: string }[] = [];
   let dedupSkipped = 0;
+  const hasEmbedding = !!process.env.OPENAI_API_KEY;
+
+  type SimilarRow = { id: string; content: string; similarity: number };
 
   for (const item of items) {
-    // Get embedding first — needed for both dedup check and storage
-    const embedding = await getEmbedding(item.content);
+    const embedding = hasEmbedding ? await getEmbedding(item.content) : null;
 
-    // Semantic dedup: skip if a very similar item already exists (sim >= 0.97)
+    // Default action when no embedding available
+    let action: 'ADD' | 'UPDATE' | 'NONE' = 'ADD';
+    let existingRow: SimilarRow | null = null;
+
     if (embedding) {
       const { data: similar } = await supabase.rpc('match_knowledge', {
         query_embedding: embedding,
-        match_count: 1,
-        similarity_threshold: 0.97,
+        match_count: 3,
+        similarity_threshold: 0.85,
       });
-      if (similar && (similar as { similarity: number }[]).length > 0) {
-        const sim = (similar as { similarity: number }[])[0].similarity;
-        console.log(`[DEDUP] Skipping duplicate: ${item.content.slice(0, 50)}... (sim: ${sim.toFixed(3)})`);
-        dedupSkipped++;
-        continue;
+      const matches = (similar ?? []) as SimilarRow[];
+
+      if (matches.length > 0) {
+        const top = matches[0];
+        if (top.similarity >= 0.97) {
+          // Exact duplicate — skip
+          console.log(`[CRUD] NONE (exact dup sim:${top.similarity.toFixed(3)}): ${item.content.slice(0, 50)}`);
+          action = 'NONE';
+        } else {
+          // Fuzzy match — ask Haiku
+          existingRow = top;
+          action = await askHaikuCrudDecision(top.content, item.content);
+          console.log(`[CRUD] Haiku decision=${action} sim:${top.similarity.toFixed(3)}: ${item.content.slice(0, 50)}`);
+        }
       }
+    }
+
+    if (action === 'NONE') {
+      dedupSkipped++;
+      continue;
     }
 
     const row = {
@@ -198,34 +239,76 @@ export async function saveExtractedKnowledge(
       source_type: sourceType,
     };
 
-    const { data, error } = await supabase
-      .from('extracted_knowledge')
-      .insert(row)
-      .select('id, content')
-      .single();
-
-    if (error) {
-      console.error('[INTAKE] extracted_knowledge INSERT error:', JSON.stringify(error));
-      continue;
-    }
-
-    const inserted = data as { id: string; content: string } | null;
-    if (!inserted) continue;
-    saved.push(inserted);
-
-    // Store embedding
-    if (embedding) {
-      const { error: embErr } = await supabase
+    if (action === 'UPDATE' && existingRow) {
+      // Insert new record, mark old as superseded
+      const { data: insertedData, error: insertErr } = await supabase
         .from('extracted_knowledge')
-        .update({ embedding })
-        .eq('id', inserted.id);
-      if (embErr) {
-        console.error('[pitstop] embedding update error for', inserted.id, embErr.message);
+        .insert({ ...row, event_type: 'UPDATE' })
+        .select('id, content')
+        .single();
+
+      if (insertErr || !insertedData) {
+        console.error('[CRUD] UPDATE insert failed:', insertErr?.message);
+        continue;
+      }
+
+      const newRow = insertedData as { id: string; content: string };
+      saved.push(newRow);
+
+      // Mark old as superseded
+      await supabase
+        .from('extracted_knowledge')
+        .update({ superseded_by: newRow.id, event_type: 'SUPERSEDED' })
+        .eq('id', existingRow.id);
+
+      // memory_history
+      await supabase.from('memory_history').insert({
+        knowledge_id: newRow.id,
+        prev_value: existingRow.content,
+        new_value: item.content,
+        action: 'UPDATE',
+        reason: 'Haiku decided update',
+      }).then(({ error: hErr }) => {
+        if (hErr) console.error('[CRUD] memory_history UPDATE error:', hErr.message);
+      });
+
+      if (embedding) {
+        await supabase.from('extracted_knowledge').update({ embedding }).eq('id', newRow.id);
+      }
+    } else {
+      // ADD
+      const { data, error } = await supabase
+        .from('extracted_knowledge')
+        .insert({ ...row, event_type: 'ADD' })
+        .select('id, content')
+        .single();
+
+      if (error || !data) {
+        console.error('[INTAKE] extracted_knowledge INSERT error:', error?.message);
+        continue;
+      }
+
+      const inserted = data as { id: string; content: string };
+      saved.push(inserted);
+
+      // memory_history
+      await supabase.from('memory_history').insert({
+        knowledge_id: inserted.id,
+        prev_value: null,
+        new_value: item.content,
+        action: 'ADD',
+        reason: 'new knowledge',
+      }).then(({ error: hErr }) => {
+        if (hErr) console.error('[CRUD] memory_history ADD error:', hErr.message);
+      });
+
+      if (embedding) {
+        await supabase.from('extracted_knowledge').update({ embedding }).eq('id', inserted.id);
       }
     }
   }
 
-  console.log(`[INTAKE] extracted_knowledge saved: ${saved.length} items, dedup skipped: ${dedupSkipped}`);
+  console.log(`[INTAKE] extracted_knowledge: ${saved.length} saved, ${dedupSkipped} skipped`);
   return { saved, dedupSkipped };
 }
 
