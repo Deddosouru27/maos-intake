@@ -7,22 +7,21 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const SYSTEM_PROMPT = `You are a knowledge extraction engine. Extract insights from content.
 ALWAYS respond in Russian. All content, business_value, and summary must be in Russian language.
 RULES:
-Extract MAX 5 insights. Choose the 5 most important and actionable.
+Extract the most important and actionable insights (limit set per request).
 IGNORE: ads, sponsors, promotions, self-promotion, affiliate links, off-topic tangents.
 IGNORE: product placements, affiliate promotions, unrelated tangents. Only extract insights about the main topic.
 Each insight must be actionable or strategically valuable.
 Be CONCISE. Maximum 2 sentences per insight.
 business_value: 1 sentence only.
 Output ONLY valid JSON. No markdown, no commentary.
-SCORING CALIBRATION:
-- immediate_relevance (r) 0.7+ means: THIS DIRECTLY SOLVES a current task or current_need listed in context. Not just 'related to AI'. Must match a SPECIFIC project need.
-- immediate_relevance 0.3-0.7 means: useful for our direction but no specific task right now
-- immediate_relevance <0.3 means: interesting but not related to current projects
+STRICT CALIBRATION:
+- immediate_relevance (r) 0.7+ ONLY if it DIRECTLY solves a CURRENT ACTIVE task listed in context. Generic AI knowledge = max 0.5 even if related to our projects. Must reference a SPECIFIC current need, not just general topic.
+- Default range: 0.3-0.5 for most content.
+- 0.6-0.7 only if mentions specific tool/method we plan to use.
+- Below 0.3 for content outside our domains entirely.
 - strategic_relevance (s) 0.7+ means: directly in our knowledge_domains with high priority
-- strategic_relevance 0.3-0.7 means: tangentially related to our domains
-- strategic_relevance <0.3 means: outside our focus areas
-- Be STRICT. Most content should score 0.4-0.6. Only truly actionable items get 0.7+.
-- Generic AI advice without specific tool/method = max 0.5 immediate.
+- strategic_relevance 0.3-0.6 means: tangentially related to our domains
+- Target: 15-20% of items as hot (r>=0.7). If scoring more than 2 items above 0.7, reconsider.
 RESOURCES: If the content mentions specific tools, services, or repositories — add one extra item with t="tool" and content = name + URL (if available) + one sentence what it does. Only for concrete tools, not generic concepts.`;
 
 async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promise<void> {
@@ -198,6 +197,8 @@ export async function analyzeContent(text: string, source: string): Promise<Brai
   const context = await getFullContext();
   const trimmedContext = buildContextString(context);
 
+  const maxItems = trimmedText.length < 3000 ? 8 : 5;
+
   const userPrompt = `Content to analyze:
 """
 ${trimmedText}
@@ -206,7 +207,7 @@ Context about the user's projects and priorities:
 """
 ${trimmedContext}
 """
-Extract 8-12 insights as JSON. Remember: CONCISE, no ads, only actionable insights.
+Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only actionable insights.
 
 {
   "items": [
