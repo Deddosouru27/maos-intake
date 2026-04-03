@@ -550,20 +550,20 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
     try {
       const result = await rawTextPipeline(rawText, sourceType, label, title);
       if ('duplicate' in result) {
-        res.json({ status: 'duplicate', notification: '♻️ Этот контент уже обрабатывался' });
+        res.json({ success: true, status: 'duplicate', knowledge_count: 0, source_url: label, notification: '♻️ Этот контент уже обрабатывался' });
       } else {
-        res.json({ status: 'done', notification: result.notification, _diag: result.diag, ...result.analysis });
+        res.json({ success: true, status: 'done', knowledge_count: result.analysis.knowledge_items.length, source_url: label, notification: result.notification, _diag: result.diag, ...result.analysis });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error('[/process manual] pipeline failed:', message);
-      res.status(500).json({ error: message });
+      res.status(500).json({ success: false, error: message });
     }
     return;
   }
 
   if (!url) {
-    res.status(400).json({ error: 'url is required' });
+    res.status(400).json({ success: false, error: 'url is required' });
     return;
   }
 
@@ -573,18 +573,21 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
     const result = await fullPipeline(url, source);
     if ('youtube_unavailable' in result) {
       res.json({
+        success: true,
         status: 'youtube_unavailable',
+        knowledge_count: 0,
+        source_url: url,
         notification: '🎬 YouTube временно недоступен на этом сервере. Скопируй транскрипт через youtubetotranscript.com и отправь текстом',
       });
     } else if ('duplicate' in result) {
-      res.json({ status: 'duplicate', notification: '♻️ Этот контент уже обрабатывался' });
+      res.json({ success: true, status: 'duplicate', knowledge_count: 0, source_url: url, notification: '♻️ Этот контент уже обрабатывался' });
     } else {
-      res.json({ status: 'done', notification: result.notification, _diag: result.diag, ...result.analysis });
+      res.json({ success: true, status: 'done', knowledge_count: result.analysis.knowledge_items.length, source_url: url, notification: result.notification, _diag: result.diag, ...result.analysis });
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[/process] pipeline failed for ${url}:`, message);
-    res.status(500).json({ error: message });
+    res.status(500).json({ success: false, error: message });
   }
 });
 
