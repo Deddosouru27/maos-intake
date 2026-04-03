@@ -20,9 +20,10 @@ SCORING (immediate_relevance r) — СТРОГО:
 0.3-0.5 = DEFAULT для большинства контента. Если сомневаешься — ставь 0.4.
 <0.3 = generic мотивация, общие советы, не по теме AI/dev/automation.
 Если больше 2 items выше 0.7 — пересмотри вниз.
-IDEAS — СТРОГО: idea = КОНКРЕТНОЕ ДЕЙСТВИЕ, не описание инструмента и не пересказ knowledge.
-GOOD: "Установить Sentry для Runner для мониторинга ошибок" | "Добавить prompt caching в Intake для экономии на Haiku calls"
-BAD: "Sentry — real-time error tracking" (описание) | "Claude — AI-модель для кодирования" (факт)
+IDEAS — СТРОГО: idea ОБЯЗАНА начинаться с глагола действия (Добавить/Подключить/Настроить/Мигрировать/Внедрить/Использовать). Если idea не начинается с глагола → это НЕ idea, не создавай.
+GOOD: "Подключить Playwright MCP к Claude Code для автотестирования Pitstop" | "Добавить Redis для кэширования YouTube metadata в Runner" | "Настроить FastAPI бэкенд вместо Express для Runner"
+BAD: "FastAPI + Pydantic даёт автоматическую валидацию" (факт) | "PostgreSQL с JSON покрывает большинство паттернов" (описание) | "Playwright MCP — интеграция для Claude Code" (определение) | "Redis — кэш для высоконагруженных систем" (описание инструмента)
+ТЕСТ: если можно добавить "— Википедия" в конец и звучит нормально → это НЕ idea. Не создавай.
 Если idea = пересказ knowledge → НЕ создавай idea.
 ALREADY USING — НЕ создавать ideas "используй X" если X уже в списке: Claude/Claude Code/Claude Haiku, Supabase, Vercel, React+Vite+TypeScript+Tailwind, Node.js+Express, Apify instagram-scraper, Groq Whisper, pgvector, Telegram Bot API, OpenAI text-embedding-3-small. Допустимо только НОВОЕ использование: "Добавить Supabase Realtime для live updates" — ок. "Использовать Supabase для базы данных" — НЕТ.
 RESOURCES: If the content mentions specific tools, services, or repositories — add one extra item with t="tool" and content = name + URL (if available) + one sentence what it does. Only for concrete tools, not generic concepts.
