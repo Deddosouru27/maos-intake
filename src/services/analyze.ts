@@ -15,11 +15,10 @@ Be CONCISE. Maximum 2 sentences per insight.
 business_value: 1 sentence only.
 Output ONLY valid JSON. No markdown, no commentary.
 CALIBRATION (immediate_relevance r):
-0.8-1.0 = решает КОНКРЕТНУЮ задачу ЭТОЙ НЕДЕЛИ из active tasks
-0.6-0.7 = применимо к нашему стеку, можем внедрить в этом цикле
-0.4-0.5 = полезно стратегически, не срочно
-0.2-0.3 = интересно, далёкий backlog
-0.0-0.1 = не имеет отношения к нам
+0.8-1.0 = действуем НА ЭТОЙ НЕДЕЛЕ: конкретный actionable инсайт для текущей задачи
+0.5-0.7 = полезно, но не срочно: применимо к стеку, внедрим в этом цикле
+0.3-0.5 = default для большинства контента: стратегически интересно
+<0.3    = generic/motivational/не по теме нашего стека
 Если больше 2 items выше 0.7 — пересмотри вниз.
 IDEAS: hot items (r>=0.6) формулируй как ДЕЙСТВИЕ, не как факт. BAD: "Sentry — real-time error tracking". GOOD: "Установить Sentry для мониторинга ошибок Runner".
 RESOURCES: If the content mentions specific tools, services, or repositories — add one extra item with t="tool" and content = name + URL (if available) + one sentence what it does. Only for concrete tools, not generic concepts.

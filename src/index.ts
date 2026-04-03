@@ -323,6 +323,36 @@ async function runPipeline(
     console.error('[PIPELINE] ideas failed:', e instanceof Error ? e.message : String(e));
   }
 
+  // Write-after-action: context_snapshot
+  try {
+    const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+    const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+    if (pitstopUrl && pitstopKey) {
+      const { createClient: mkSb } = await import('@supabase/supabase-js');
+      const sb = mkSb(pitstopUrl, pitstopKey);
+      const { data: proj } = await sb.from('projects').select('id').eq('name', 'MAOS').limit(1).single();
+      const allEntities = analysis.knowledge_items.flatMap((i) => i.tags ?? []).filter(Boolean);
+      const uniqueEntities = [...new Set(allEntities)].slice(0, 20);
+      await sb.from('context_snapshots').insert({
+        project_id: (proj as { id: string } | null)?.id ?? null,
+        snapshot_type: 'ai_summary',
+        type: 'ai_summary',
+        content: {
+          source_url: sourceUrl,
+          source_type: sourceType,
+          knowledge_count: knowledgeSaved.length,
+          hot_count: hotItems.length,
+          entities_found: uniqueEntities,
+          duration_ms: null,
+          timestamp: new Date().toISOString(),
+        },
+      });
+      console.log('[PIPELINE] context_snapshot written');
+    }
+  } catch (e) {
+    console.warn('[PIPELINE] context_snapshot failed (non-fatal):', e instanceof Error ? e.message : String(e));
+  }
+
   return {
     notification,
     haikuItems: analysis.knowledge_items.length,
