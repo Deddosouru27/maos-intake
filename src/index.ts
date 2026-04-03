@@ -118,6 +118,15 @@ function buildNotification(routed: RoutedKnowledgeItem[]): string {
 
 let lastHeartbeatAt: string | null = null;
 
+app.get('/status', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    service: 'maos-intake',
+    timestamp: new Date().toISOString(),
+    version: '1.0',
+  });
+});
+
 app.get('/health', async (req: Request, res: Response) => {
   const key = (name: string) => (process.env[name] ? 'connected' : 'missing_key');
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
