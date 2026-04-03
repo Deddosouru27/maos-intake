@@ -14,15 +14,19 @@ Each insight must be actionable or strategically valuable.
 Be CONCISE. Maximum 2 sentences per insight.
 business_value: 1 sentence only.
 Output ONLY valid JSON. No markdown, no commentary.
-CALIBRATION (immediate_relevance r):
-0.8-1.0 = действуем НА ЭТОЙ НЕДЕЛЕ: конкретный actionable инсайт для текущей задачи
-0.5-0.7 = полезно, но не срочно: применимо к стеку, внедрим в этом цикле
-0.3-0.5 = default для большинства контента: стратегически интересно
-<0.3    = generic/motivational/не по теме нашего стека
+SCORING (immediate_relevance r) — СТРОГО:
+0.8+ = actionable THIS WEEK с нашим текущим кодом. Конкретный инсайт, реализуемый за 1-2 дня.
+0.5-0.7 = полезно стратегически, но не срочно.
+0.3-0.5 = DEFAULT для большинства контента. Если сомневаешься — ставь 0.4.
+<0.3 = generic мотивация, общие советы, не по теме AI/dev/automation.
 Если больше 2 items выше 0.7 — пересмотри вниз.
-IDEAS: hot items (r>=0.6) формулируй как ДЕЙСТВИЕ, не как факт. BAD: "Sentry — real-time error tracking". GOOD: "Установить Sentry для мониторинга ошибок Runner".
+IDEAS — СТРОГО: idea = КОНКРЕТНОЕ ДЕЙСТВИЕ, не описание инструмента и не пересказ knowledge.
+GOOD: "Установить Sentry для Runner для мониторинга ошибок" | "Добавить prompt caching в Intake для экономии на Haiku calls"
+BAD: "Sentry — real-time error tracking" (описание) | "Claude — AI-модель для кодирования" (факт)
+Если idea = пересказ knowledge → НЕ создавай idea.
+ALREADY USING — НЕ создавать ideas "используй X" если X уже в списке: Claude/Claude Code/Claude Haiku, Supabase, Vercel, React+Vite+TypeScript+Tailwind, Node.js+Express, Apify instagram-scraper, Groq Whisper, pgvector, Telegram Bot API, OpenAI text-embedding-3-small. Допустимо только НОВОЕ использование: "Добавить Supabase Realtime для live updates" — ок. "Использовать Supabase для базы данных" — НЕТ.
 RESOURCES: If the content mentions specific tools, services, or repositories — add one extra item with t="tool" and content = name + URL (if available) + one sentence what it does. Only for concrete tools, not generic concepts.
-ENTITIES: e[] and eo[] — ONLY proper nouns: tool/project/company/person names. NOT: "error handling", "batch processing", "serverless functions", "API design".
+ENTITIES: e[] and eo[] — ONLY proper nouns: имена инструментов (Sentry, Supabase), проектов (MAOS, Pitstop), людей, компаний. NEVER: "мониторинг", "автоматизация", "AI", "фреймворк", "serverless", "error handling", "batch processing".
 BATCH MODE: If the text contains multiple separate posts/messages (separated by ---, ===, or double newline + numbering), analyze EACH post separately. Extract insights from EACH post independently. Small posts may have 1-2 insights, large posts 5-8.`;
 
 async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promise<void> {
