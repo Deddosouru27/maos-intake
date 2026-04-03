@@ -255,6 +255,7 @@ async function runPipeline(
   sourceType: string,
   contentHash: string,
 ): Promise<{ notification: string; haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number; smartCrudUpdates: number; haikuRaw: string | null }> {
+  const pipelineStart = Date.now();
   // Guide detection
   const guidePattern = /guide|tutorial|step-by-step|how to|гайд|инструкция/i;
   const isGuide = guidePattern.test(analysis.summary);
@@ -325,25 +326,29 @@ async function runPipeline(
 
   // Write-after-action: context_snapshot
   try {
-    const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
-    const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
-    if (pitstopUrl && pitstopKey) {
+    const pitstopUrl = process.env.PITSTOP_SUPABASE_URL ?? process.env.SUPABASE_PITSTOP_URL;
+    const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY ?? process.env.SUPABASE_PITSTOP_ANON_KEY;
+    if (!pitstopUrl || !pitstopKey) {
+      console.warn('[PIPELINE] context_snapshot skipped: PITSTOP env vars not set');
+    } else {
       const { createClient: mkSb } = await import('@supabase/supabase-js');
       const sb = mkSb(pitstopUrl, pitstopKey);
       const { data: proj } = await sb.from('projects').select('id').eq('name', 'MAOS').limit(1).single();
       const allEntities = analysis.knowledge_items.flatMap((i) => i.tags ?? []).filter(Boolean);
-      const uniqueEntities = [...new Set(allEntities)].slice(0, 20);
+      const uniqueEntitiesCount = new Set(allEntities).size;
       await sb.from('context_snapshots').insert({
         project_id: (proj as { id: string } | null)?.id ?? null,
         snapshot_type: 'ai_summary',
         type: 'ai_summary',
         content: {
+          type: 'intake_processing_log',
           source_url: sourceUrl,
           source_type: sourceType,
           knowledge_count: knowledgeSaved.length,
           hot_count: hotItems.length,
-          entities_found: uniqueEntities,
-          duration_ms: null,
+          entities_found: uniqueEntitiesCount,
+          ideas_created: hotItems.length,
+          duration_ms: Date.now() - pipelineStart,
           timestamp: new Date().toISOString(),
         },
       });
