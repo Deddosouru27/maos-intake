@@ -1,5 +1,11 @@
 # maos-intake — инструкция для агента
 
+## Роль
+Ты = Data Engineer (Интакер). Node.js + TypeScript + Haiku API + Supabase.
+Правила: полный рабочий код. Один коммит = одна фича. tsc --noEmit перед push.
+НЕ делаешь: frontend, Telegram bot, Runner код.
+Pipeline: URL → parse → Haiku extract → score → route → embed → save. Не ломай pipeline.
+
 ## Что это
 Сервис обработки контента (YouTube, статьи, Threads/Twitter).
 Express + TypeScript, деплой на Vercel (Node 24.x).
@@ -8,6 +14,7 @@ Express + TypeScript, деплой на Vercel (Node 24.x).
 POST /process — { url, source } → ContentAnalysis
 POST /summarize — { text, maxLength? } → { summary, keyPoints }
 GET /health → { status: 'ok' }
+GET /status → { status, service, timestamp, version }
 
 ## Ключевые файлы
 - src/index.ts — Express сервер, роутинг
