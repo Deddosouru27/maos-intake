@@ -765,6 +765,43 @@ app.post('/batch', processLimiter, async (req: Request, res: Response) => {
   res.json({ results, errors });
 });
 
+app.post('/process/batch', processLimiter, async (req: Request, res: Response) => {
+  const { urls, source_type: bodySourceType } = req.body as { urls?: unknown; source_type?: string };
+
+  if (!Array.isArray(urls) || urls.length === 0) {
+    res.status(400).json({ success: false, error: 'urls[] required' });
+    return;
+  }
+  if (urls.length > 10) {
+    res.status(400).json({ success: false, error: 'Maximum 10 URLs per batch' });
+    return;
+  }
+
+  const settled = await Promise.allSettled(
+    (urls as string[]).map(async (url) => {
+      if (!url || typeof url !== 'string' || !url.startsWith('http')) {
+        throw new Error('Invalid URL');
+      }
+      const source = detectSource(url, bodySourceType);
+      const result = await fullPipeline(url, source);
+      if ('duplicate' in result) return { url, status: 'skipped' as const, reason: 'duplicate' };
+      if ('youtube_unavailable' in result) return { url, status: 'skipped' as const, reason: 'youtube_unavailable' };
+      return { url, status: 'success' as const, knowledge_count: result.analysis.knowledge_items.length };
+    })
+  );
+
+  const results = settled.map((s, i) => {
+    if (s.status === 'fulfilled') return s.value;
+    return { url: (urls as string[])[i] ?? '', status: 'error' as const, error: s.reason instanceof Error ? s.reason.message : String(s.reason) };
+  });
+
+  const successCount = results.filter(r => r.status === 'success').length;
+  const skippedCount = results.filter(r => r.status === 'skipped').length;
+  const errorCount   = results.filter(r => r.status === 'error').length;
+
+  res.json({ success: true, results, summary: { success: successCount, skipped: skippedCount, errors: errorCount } });
+});
+
 app.get('/stats', async (_req: Request, res: Response) => {
   const { createClient } = await import('@supabase/supabase-js');
 
