@@ -29,21 +29,57 @@ async function writeContextSnapshot(
   const entitiesCount = new Set(allEntities).size;
   const { createClient: mkSb } = await import('@supabase/supabase-js');
   const sb = mkSb(pitstopUrl, pitstopKey);
-  await sb.from('context_snapshots').insert({
-    snapshot_type: 'intake_processing_log',
-    content: {
-      type: 'intake_processing_log',
-      url,
-      source_type: sourceType,
-      knowledge_count: knowledgeCount,
-      ideas_count: ideasCount,
-      entities_count: entitiesCount,
-      status: error ? 'error' : 'success',
-      ...(error ? { error } : {}),
-      date: new Date().toISOString(),
-    },
-  });
+  const content = {
+    type: 'intake_processing_log',
+    url,
+    source_type: sourceType,
+    knowledge_count: knowledgeCount,
+    ideas_count: ideasCount,
+    entities_count: entitiesCount,
+    status: error ? 'error' : 'success',
+    ...(error ? { error } : {}),
+    date: new Date().toISOString(),
+  };
+
+  const { data, error: insertErr } = await sb
+    .from('context_snapshots')
+    .insert({ snapshot_type: 'intake_processing_log', content })
+    .select('id')
+    .single();
+
+  if (insertErr) {
+    console.warn('[PIPELINE] context_snapshot insert failed:', insertErr.message);
+    return;
+  }
+
+  const snapshotId = (data as { id: string } | null)?.id;
   console.log(`[PIPELINE] context_snapshot written (knowledge:${knowledgeCount} ideas:${ideasCount} entities:${entitiesCount} duration:${Date.now() - pipelineStart}ms)`);
+
+  // Auto-embed: generate embedding from content JSON for semantic search
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!snapshotId || !openaiKey) return;
+
+  try {
+    const { default: OpenAI } = await import('openai');
+    const oai = new OpenAI({ apiKey: openaiKey });
+    const resp = await oai.embeddings.create({
+      model: 'text-embedding-3-small',
+      input: JSON.stringify(content).slice(0, 8000),
+      dimensions: 512,
+    });
+    const embedding = resp.data[0].embedding;
+    const { error: updateErr } = await sb
+      .from('context_snapshots')
+      .update({ embedding })
+      .eq('id', snapshotId);
+    if (updateErr) {
+      console.warn('[PIPELINE] context_snapshot embedding update failed:', updateErr.message);
+    } else {
+      console.log('[PIPELINE] context_snapshot embedding saved');
+    }
+  } catch (e) {
+    console.warn('[PIPELINE] context_snapshot embedding failed (non-fatal):', e instanceof Error ? e.message : String(e));
+  }
 }
 
 async function writeIntakeLog(fields: {
