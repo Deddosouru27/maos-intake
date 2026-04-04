@@ -276,6 +276,8 @@ async function runPipeline(
   const routed = routeItems(rankedItems);
   const hotItems = routed.filter((i) => i.routed_to === 'hot_backlog');
   const strategicItems = routed.filter((i) => i.routed_to === 'knowledge_base');
+  // Strategic ideas: knowledge_base items with immediate_relevance 0.5–0.69 → appear in ideas as 'strategic'
+  const strategicIdeas = strategicItems.filter((i) => i.immediate_relevance >= 0.5);
   const discarded = routed.filter((i) => i.routed_to === 'discarded');
   const notification = buildNotification(routed);
   const routingResult = `hot:${hotItems.length},strategic:${strategicItems.length},discarded:${discarded.length}`;
@@ -327,7 +329,7 @@ async function runPipeline(
 
   console.log('[PIPELINE] saving ideas...');
   try {
-    await saveToPitstop(analysis, hotItems, sourceType, sourceUrl, knowledgeSaved);
+    await saveToPitstop(analysis, hotItems, sourceType, sourceUrl, knowledgeSaved, strategicIdeas);
     console.log('[PIPELINE] ideas ok');
   } catch (e) {
     console.error('[PIPELINE] ideas failed:', e instanceof Error ? e.message : String(e));

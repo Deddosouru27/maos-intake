@@ -418,9 +418,15 @@ export async function saveToPitstop(
   sourceType: string,
   sourceUrl?: string,
   knowledgeSaved?: { id: string; content: string }[],
+  strategicItems: KnowledgeItem[] = [],
 ): Promise<void> {
-  if (hotItems.length === 0) {
-    console.log('[pitstop] no hot items to save to ideas');
+  const allItems = [
+    ...hotItems.map(i => ({ item: i, relevance: 'hot' as const })),
+    ...strategicItems.map(i => ({ item: i, relevance: 'strategic' as const })),
+  ];
+
+  if (allItems.length === 0) {
+    console.log('[pitstop] no items to save to ideas');
     return;
   }
 
@@ -438,13 +444,13 @@ export async function saveToPitstop(
     knowledgeMap.set(k.content, k.id);
   }
 
-  const rows = hotItems.map((item) => ({
+  const rows = allItems.map(({ item, relevance }) => ({
     content: item.content,
     summary: item.content.slice(0, 80),
     ai_category: item.knowledge_type,
     source_type: sourceType,
     source_url: sourceUrl ?? null,
-    relevance: 'hot',
+    relevance,
     ai_analysis: analysis,
     status: 'new',
     project_id: null,
@@ -456,6 +462,6 @@ export async function saveToPitstop(
   if (error) {
     console.error('[pitstop] ideas INSERT failed:', JSON.stringify(error));
   } else {
-    console.log(`[pitstop] saved ${hotItems.length} hot ideas from ${sourceType}`);
+    console.log(`[pitstop] saved ${hotItems.length} hot + ${strategicItems.length} strategic ideas from ${sourceType}`);
   }
 }
