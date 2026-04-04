@@ -209,6 +209,7 @@ app.get('/health', async (req: Request, res: Response) => {
   let pending_tasks = 0;
   let supabase_ok = false;
   let last_processed: string | null = null;
+  let knowledge_without_embedding = 0;
 
   if (pitstopUrl && pitstopKey) {
     try {
@@ -219,12 +220,14 @@ app.get('/health', async (req: Request, res: Response) => {
         sb.from('extracted_knowledge').select('*', { count: 'exact', head: true }).not('entity_objects', 'is', null).neq('entity_objects', '[]'),
         sb.from('ingested_content').select('*', { count: 'exact', head: true }).eq('processing_status', 'pending'),
         sb.from('extracted_knowledge').select('created_at').order('created_at', { ascending: false }).limit(1),
+        sb.from('extracted_knowledge').select('*', { count: 'exact', head: true }).is('embedding', null),
       ] as const;
       const base = await Promise.all(queries);
       knowledge_count = base[0].count ?? 0;
       entity_count = base[1].count ?? 0;
       pending_ingestion = base[2].count ?? 0;
       last_processed = (base[3].data?.[0] as { created_at: string } | undefined)?.created_at ?? null;
+      knowledge_without_embedding = base[4].count ?? 0;
       supabase_ok = true;
 
       if (isPreflight) {
@@ -256,10 +259,15 @@ app.get('/health', async (req: Request, res: Response) => {
     }
   }
 
+  const embeddingMissingRatio = knowledge_count > 0 ? knowledge_without_embedding / knowledge_count : 0;
+  const embedding_degraded = supabase_ok && embeddingMissingRatio > 0.05;
+  const overallStatus = !supabase_ok ? 'degraded' : embedding_degraded ? 'degraded' : 'ok';
+
   const response: Record<string, unknown> = {
-    status: supabase_ok ? 'ok' : 'degraded',
+    status: overallStatus,
     version: '1.0.0',
     knowledge_count,
+    knowledge_without_embedding,
     entity_count,
     pending_ingestion,
     last_heartbeat: lastHeartbeatAt,
@@ -269,6 +277,7 @@ app.get('/health', async (req: Request, res: Response) => {
     services: {
       anthropic: key('ANTHROPIC_API_KEY'),
       groq: key('GROQ_API_KEY'),
+      openai: key('OPENAI_API_KEY'),
       pitstop_supabase: key('PITSTOP_SUPABASE_ANON_KEY'),
       memory_supabase: key('MEMORY_SUPABASE_ANON_KEY'),
     },
@@ -279,7 +288,7 @@ app.get('/health', async (req: Request, res: Response) => {
     response.pending_tasks = pending_tasks;
   }
 
-  res.status(supabase_ok ? 200 : 503).json(response);
+  res.status(overallStatus === 'ok' ? 200 : 503).json(response);
 });
 
 // Phase 1: fetch raw content (no analysis — allows dedup check before API call)

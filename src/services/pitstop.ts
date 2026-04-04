@@ -192,6 +192,9 @@ export async function saveExtractedKnowledge(
     let action: 'ADD' | 'UPDATE' | 'NONE' = 'ADD';
     let existingRow: SimilarRow | null = null;
 
+    if (hasEmbedding && !embedding) {
+      console.warn(`[SMART_CRUD] ⚠️ embedding generation failed for: ${item.content.slice(0, 60)}`);
+    }
     console.log(`[SMART_CRUD] New: ${item.content.slice(0, 80)}`);
 
     if (embedding) {
@@ -278,7 +281,9 @@ export async function saveExtractedKnowledge(
       });
 
       if (embedding) {
-        await supabase.from('extracted_knowledge').update({ embedding }).eq('id', newRow.id);
+        const { error: embErr } = await supabase.from('extracted_knowledge').update({ embedding }).eq('id', newRow.id);
+        if (embErr) console.warn(`[SMART_CRUD] ⚠️ embedding update failed for ID ${newRow.id}:`, embErr.message);
+        else console.log(`[SMART_CRUD] ✅ embedding generated for knowledge ID ${newRow.id}`);
       }
     } else {
       // ADD
@@ -308,7 +313,9 @@ export async function saveExtractedKnowledge(
       });
 
       if (embedding) {
-        await supabase.from('extracted_knowledge').update({ embedding }).eq('id', inserted.id);
+        const { error: embErr } = await supabase.from('extracted_knowledge').update({ embedding }).eq('id', inserted.id);
+        if (embErr) console.warn(`[SMART_CRUD] ⚠️ embedding update failed for ID ${inserted.id}:`, embErr.message);
+        else console.log(`[SMART_CRUD] ✅ embedding generated for knowledge ID ${inserted.id}`);
       }
     }
   }
