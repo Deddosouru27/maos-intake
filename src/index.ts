@@ -13,6 +13,39 @@ import { fetchInstagramTranscript } from './apify';
 import { getFullContext } from './services/projectContext';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, RoutedTo } from './types';
 
+async function writeContextSnapshot(
+  url: string,
+  sourceType: string,
+  knowledgeCount: number,
+  ideasCount: number,
+  analysis: BrainAnalysis,
+  pipelineStart: number,
+  error?: string,
+): Promise<void> {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL ?? process.env.SUPABASE_PITSTOP_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY ?? process.env.SUPABASE_PITSTOP_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) return;
+  const allEntities = analysis.knowledge_items.flatMap((i) => i.tags ?? []).filter(Boolean);
+  const entitiesCount = new Set(allEntities).size;
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+  await sb.from('context_snapshots').insert({
+    snapshot_type: 'intake_processing_log',
+    content: {
+      type: 'intake_processing_log',
+      url,
+      source_type: sourceType,
+      knowledge_count: knowledgeCount,
+      ideas_count: ideasCount,
+      entities_count: entitiesCount,
+      status: error ? 'error' : 'success',
+      ...(error ? { error } : {}),
+      date: new Date().toISOString(),
+    },
+  });
+  console.log(`[PIPELINE] context_snapshot written (knowledge:${knowledgeCount} ideas:${ideasCount} entities:${entitiesCount} duration:${Date.now() - pipelineStart}ms)`);
+}
+
 async function writeIntakeLog(fields: {
   url: string;
   stage: string;
@@ -352,38 +385,9 @@ async function runPipeline(
   }
 
   // Write-after-action: context_snapshot
-  try {
-    const pitstopUrl = process.env.PITSTOP_SUPABASE_URL ?? process.env.SUPABASE_PITSTOP_URL;
-    const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY ?? process.env.SUPABASE_PITSTOP_ANON_KEY;
-    if (!pitstopUrl || !pitstopKey) {
-      console.warn('[PIPELINE] context_snapshot skipped: PITSTOP env vars not set');
-    } else {
-      const { createClient: mkSb } = await import('@supabase/supabase-js');
-      const sb = mkSb(pitstopUrl, pitstopKey);
-      const { data: proj } = await sb.from('projects').select('id').eq('name', 'MAOS').limit(1).single();
-      const allEntities = analysis.knowledge_items.flatMap((i) => i.tags ?? []).filter(Boolean);
-      const uniqueEntitiesCount = new Set(allEntities).size;
-      await sb.from('context_snapshots').insert({
-        project_id: (proj as { id: string } | null)?.id ?? null,
-        snapshot_type: 'ai_summary',
-        type: 'ai_summary',
-        content: {
-          type: 'intake_processing_log',
-          source_url: sourceUrl,
-          source_type: sourceType,
-          knowledge_count: knowledgeSaved.length,
-          hot_count: hotItems.length,
-          entities_found: uniqueEntitiesCount,
-          ideas_created: hotItems.length,
-          duration_ms: Date.now() - pipelineStart,
-          timestamp: new Date().toISOString(),
-        },
-      });
-      console.log('[PIPELINE] context_snapshot written');
-    }
-  } catch (e) {
+  writeContextSnapshot(sourceUrl, sourceType, knowledgeSaved.length, hotItems.length + strategicIdeas.length, analysis, pipelineStart).catch((e) => {
     console.warn('[PIPELINE] context_snapshot failed (non-fatal):', e instanceof Error ? e.message : String(e));
-  }
+  });
 
   return {
     notification,
