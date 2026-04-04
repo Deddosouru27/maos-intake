@@ -1306,6 +1306,128 @@ app.post('/auto-discover', async (req: Request, res: Response) => {
   res.json({ discovered: total, by_topic: counts });
 });
 
+app.post('/triage', async (req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!pitstopUrl || !pitstopKey || !anthropicKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const limit = Math.min(Number(req.body?.limit ?? 5), 20);
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+  const { default: AnthropicClient } = await import('@anthropic-ai/sdk');
+  const anthropic = new AnthropicClient({ apiKey: anthropicKey });
+
+  // Fetch few-shot calibration examples
+  let fewShotBlock = '';
+  try {
+    const { data: calRows } = await sb
+      .from('context_snapshots')
+      .select('content')
+      .eq('snapshot_type', 'calibration_data')
+      .limit(5);
+    const examples = (calRows ?? [])
+      .map(r => {
+        const c = r.content as Record<string, unknown>;
+        if (c?.type !== 'idea_triage_calibration') return null;
+        return `Идея: ${c.idea}\nРешение: ${c.decision}\nПричина: ${c.reason}`;
+      })
+      .filter(Boolean);
+    if (examples.length > 0) {
+      fewShotBlock = '\n\nПримеры калибровки:\n' + examples.join('\n---\n');
+    }
+  } catch (e) {
+    console.warn('[triage] calibration fetch failed (non-fatal):', e instanceof Error ? e.message : String(e));
+  }
+
+  const SYSTEM = `Ты CEO MAOS — принимаешь решения об идеях для системы автономной разработки.
+Стек: Node.js, TypeScript, Supabase, Claude/Haiku, React+Vite+Tailwind, Telegram Bot API, pgvector.
+Принципы: не костыли, а разобраться и починить. Цель — полная автономность агентов.
+Triage опирается на цели, потребности, задачи и контекст MAOS.
+
+Для каждой идеи верни ОДИН из трёх вариантов:
+- "approve": полезно, релевантно, оставить
+- "reject": мусор / не наш стек / описание а не действие / generic / уже делаем / костыль
+- "needs_clarification": потенциально ценно, но не хватает деталей
+
+Верни ТОЛЬКО валидный JSON объект (без markdown):
+{"decision":"approve"|"reject"|"needs_clarification","reason":"1 sentence"}${fewShotBlock}`;
+
+  const { data: ideas, error: fetchErr } = await sb
+    .from('ideas')
+    .select('id, content, relevance, source_type, ai_category')
+    .eq('status', 'new')
+    .order('created_at', { ascending: true })
+    .limit(limit);
+
+  if (fetchErr || !ideas || ideas.length === 0) {
+    res.json({ processed: 0, approved: 0, rejected: 0, needs_clarification: 0, details: [] });
+    return;
+  }
+
+  const details: { id: string; content: string; decision: string; reason: string }[] = [];
+  let approved = 0;
+  let rejected = 0;
+  let needsClarification = 0;
+
+  for (const idea of ideas) {
+    const content = (idea.content as string ?? '').slice(0, 300);
+    let decision = 'approve';
+    let reason = '';
+
+    try {
+      const msg = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 256,
+        system: SYSTEM,
+        messages: [{
+          role: 'user',
+          content: `Идея: ${content}\nТип: ${idea.ai_category ?? 'unknown'}\nРелевантность: ${idea.relevance ?? 'unknown'}`,
+        }],
+      });
+      const raw = (msg.content[0] as { type: string; text: string }).text.trim();
+      const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+      const parsed = JSON.parse(cleaned) as { decision: string; reason: string };
+      if (['approve', 'reject', 'needs_clarification'].includes(parsed.decision)) {
+        decision = parsed.decision;
+        reason = parsed.reason ?? '';
+      }
+    } catch (e) {
+      console.error(`[triage] Haiku failed for idea ${idea.id}:`, e instanceof Error ? e.message : String(e));
+      // Skip UPDATE, count as processed but not in details
+      continue;
+    }
+
+    const updatePayload: Record<string, unknown> = {
+      status: decision === 'reject' ? 'rejected' : decision === 'needs_clarification' ? 'pending' : 'approved',
+      reviewed_by: 'haiku-triage',
+      reviewed_at: new Date().toISOString(),
+    };
+    if (decision === 'reject') updatePayload.rejection_reason = reason;
+
+    await sb.from('ideas').update(updatePayload).eq('id', idea.id);
+
+    details.push({ id: idea.id as string, content: content.slice(0, 80), decision, reason });
+    if (decision === 'approve') approved++;
+    else if (decision === 'reject') rejected++;
+    else needsClarification++;
+  }
+
+  console.log(`[triage] processed ${details.length}/${ideas.length}: ${approved} approved, ${rejected} rejected, ${needsClarification} needs_clarification`);
+
+  res.json({
+    processed: details.length,
+    approved,
+    rejected,
+    needs_clarification: needsClarification,
+    details,
+  });
+});
+
 app.post('/auto-triage', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
