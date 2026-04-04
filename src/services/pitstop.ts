@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
-import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem } from '../types';
+import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, EntityObject } from '../types';
 
 const openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -315,6 +315,101 @@ export async function saveExtractedKnowledge(
 
   console.log(`[INTAKE] extracted_knowledge: ${saved.length} saved, ${dedupSkipped} skipped, ${smartCrudUpdates} updated`);
   return { saved, dedupSkipped, smartCrudUpdates };
+}
+
+// Upsert entity_nodes and entity_edges for graph population
+export async function upsertEntityGraph(
+  entityObjects: EntityObject[],
+): Promise<void> {
+  if (!entityObjects || entityObjects.length === 0) return;
+
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL ?? process.env.SUPABASE_PITSTOP_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY ?? process.env.SUPABASE_PITSTOP_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) return;
+
+  const supabase = createClient(pitstopUrl, pitstopKey);
+
+  // Deduplicate by lowercase name, keep first occurrence (preserves type)
+  const seen = new Set<string>();
+  const unique: EntityObject[] = [];
+  for (const e of entityObjects) {
+    const key = e.name.trim().toLowerCase();
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      unique.push(e);
+    }
+  }
+  if (unique.length === 0) return;
+
+  const names = unique.map(e => e.name);
+
+  // Fetch existing nodes in one query
+  const { data: existing } = await supabase
+    .from('entity_nodes')
+    .select('id, name, mention_count')
+    .in('name', names);
+
+  const existingByName = new Map(
+    (existing ?? []).map(n => [n.name as string, n as { id: string; mention_count: number }])
+  );
+
+  const toInsert = unique.filter(e => !existingByName.has(e.name));
+  const toUpdate = unique.filter(e => existingByName.has(e.name));
+
+  // name → id map for edge building
+  const nodeIdMap = new Map<string, string>();
+
+  // Insert new nodes
+  if (toInsert.length > 0) {
+    const { data: inserted, error: insertErr } = await supabase
+      .from('entity_nodes')
+      .insert(toInsert.map(e => ({ name: e.name, type: e.type, mention_count: 1 })))
+      .select('id, name');
+    if (insertErr) {
+      console.error('[entity_graph] insert nodes error:', insertErr.message);
+    }
+    for (const n of inserted ?? []) {
+      nodeIdMap.set(n.name as string, n.id as string);
+    }
+  }
+
+  // Increment mention_count for existing nodes
+  for (const e of toUpdate) {
+    const node = existingByName.get(e.name);
+    if (!node) continue;
+    nodeIdMap.set(e.name, node.id);
+    await supabase
+      .from('entity_nodes')
+      .update({ mention_count: (node.mention_count ?? 0) + 1, updated_at: new Date().toISOString() })
+      .eq('id', node.id);
+  }
+
+  // Build co-occurrence edges for all unique pairs
+  const nodeIds = [...nodeIdMap.values()];
+  if (nodeIds.length < 2) return;
+
+  const edgeRows: { source_id: string; target_id: string; relationship: string; weight: number }[] = [];
+  for (let i = 0; i < nodeIds.length - 1; i++) {
+    for (let j = i + 1; j < nodeIds.length; j++) {
+      edgeRows.push({
+        source_id: nodeIds[i],
+        target_id: nodeIds[j],
+        relationship: 'co_occurs',
+        weight: 1,
+      });
+    }
+  }
+
+  if (edgeRows.length > 0) {
+    const { error: edgeErr } = await supabase
+      .from('entity_edges')
+      .upsert(edgeRows, { onConflict: 'source_id,target_id,relationship', ignoreDuplicates: true });
+    if (edgeErr) {
+      console.error('[entity_graph] upsert edges error:', edgeErr.message);
+    }
+  }
+
+  console.log(`[entity_graph] upserted ${toInsert.length} new nodes, updated ${toUpdate.length}, ${edgeRows.length} edges`);
 }
 
 export async function saveToPitstop(

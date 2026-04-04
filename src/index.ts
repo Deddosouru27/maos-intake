@@ -6,7 +6,7 @@ import { createClient } from '@supabase/supabase-js';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent, analyzeWithChunking } from './services/analyze';
-import { insertIngestedPending, updateIngestedDone, saveExtractedKnowledge, saveToPitstop } from './services/pitstop';
+import { insertIngestedPending, updateIngestedDone, saveExtractedKnowledge, saveToPitstop, upsertEntityGraph } from './services/pitstop';
 import { rerankItems } from './services/rerank';
 import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
@@ -331,6 +331,16 @@ async function runPipeline(
     console.log('[PIPELINE] ideas ok');
   } catch (e) {
     console.error('[PIPELINE] ideas failed:', e instanceof Error ? e.message : String(e));
+  }
+
+  // Upsert entity graph — collect all entity_objects from saved items
+  try {
+    const allEntityObjects = itemsToSave.flatMap(i => i.entity_objects ?? []);
+    if (allEntityObjects.length > 0) {
+      await upsertEntityGraph(allEntityObjects);
+    }
+  } catch (e) {
+    console.error('[PIPELINE] entity_graph failed (non-fatal):', e instanceof Error ? e.message : String(e));
   }
 
   // Write-after-action: context_snapshot
