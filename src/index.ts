@@ -139,6 +139,7 @@ app.get('/health', async (req: Request, res: Response) => {
   let pending_ingestion = 0;
   let pending_tasks = 0;
   let supabase_ok = false;
+  let last_processed: string | null = null;
 
   if (pitstopUrl && pitstopKey) {
     try {
@@ -148,11 +149,13 @@ app.get('/health', async (req: Request, res: Response) => {
         sb.from('extracted_knowledge').select('*', { count: 'exact', head: true }),
         sb.from('extracted_knowledge').select('*', { count: 'exact', head: true }).not('entity_objects', 'is', null).neq('entity_objects', '[]'),
         sb.from('ingested_content').select('*', { count: 'exact', head: true }).eq('processing_status', 'pending'),
+        sb.from('extracted_knowledge').select('created_at').order('created_at', { ascending: false }).limit(1),
       ] as const;
       const base = await Promise.all(queries);
       knowledge_count = base[0].count ?? 0;
       entity_count = base[1].count ?? 0;
       pending_ingestion = base[2].count ?? 0;
+      last_processed = (base[3].data?.[0] as { created_at: string } | undefined)?.created_at ?? null;
       supabase_ok = true;
 
       if (isPreflight) {
@@ -185,11 +188,14 @@ app.get('/health', async (req: Request, res: Response) => {
   }
 
   const response: Record<string, unknown> = {
-    status: 'ok',
+    status: supabase_ok ? 'ok' : 'degraded',
+    version: '1.0.0',
     knowledge_count,
     entity_count,
     pending_ingestion,
     last_heartbeat: lastHeartbeatAt,
+    last_processed,
+    supabase: supabase_ok ? 'connected' : 'error',
     uptime: 'ok',
     services: {
       anthropic: key('ANTHROPIC_API_KEY'),
@@ -200,12 +206,11 @@ app.get('/health', async (req: Request, res: Response) => {
   };
 
   if (isPreflight) {
-    response.supabase = supabase_ok;
     response.telegram = telegram_ok;
     response.pending_tasks = pending_tasks;
   }
 
-  res.json(response);
+  res.status(supabase_ok ? 200 : 503).json(response);
 });
 
 // Phase 1: fetch raw content (no analysis — allows dedup check before API call)
