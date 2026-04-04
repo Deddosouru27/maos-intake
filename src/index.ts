@@ -774,6 +774,76 @@ app.post('/batch', processLimiter, async (req: Request, res: Response) => {
   res.json({ results, errors });
 });
 
+async function processBatchUrl(
+  url: string,
+  source: Source,
+): Promise<{ url: string; status: 'success' | 'skipped' | 'error'; reason?: string; knowledge_count?: number; error?: string }> {
+  const attempt = async () => fullPipeline(url, source);
+
+  let result;
+  try {
+    result = await attempt();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Validation errors (bad URL format etc.) — no retry
+    if (msg.toLowerCase().includes('invalid') || msg.includes('400')) {
+      return { url, status: 'error', error: msg };
+    }
+    // Pipeline/network failure — 1 retry after 3s (equivalent to 5xx)
+    console.warn(`[batch] ${url} failed, retrying in 3s: ${msg}`);
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      result = await attempt();
+    } catch (retryErr) {
+      const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+      return { url, status: 'error', error: retryMsg };
+    }
+  }
+
+  if ('duplicate' in result) return { url, status: 'skipped', reason: 'duplicate' };
+  if ('youtube_unavailable' in result) return { url, status: 'skipped', reason: 'youtube_unavailable' };
+  return { url, status: 'success', knowledge_count: result.analysis.knowledge_items.length };
+}
+
+async function writeBatchSummary(
+  total: number,
+  successCount: number,
+  errorCount: number,
+  skippedCount: number,
+): Promise<void> {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL ?? process.env.SUPABASE_PITSTOP_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY ?? process.env.SUPABASE_PITSTOP_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) return;
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  // Batch summary snapshot
+  await sb.from('context_snapshots').insert({
+    snapshot_type: 'batch_processing_log',
+    content: {
+      type: 'batch_processing_log',
+      total,
+      success: successCount,
+      error: errorCount,
+      skipped: skippedCount,
+      date: new Date().toISOString(),
+    },
+  }).then(({ error }) => {
+    if (error) console.warn('[batch] context_snapshot insert failed:', error.message);
+    else console.log('[batch] batch_processing_log snapshot written');
+  });
+
+  // Notification via agent_events
+  if (successCount > 0) {
+    await sb.from('agent_events').insert({
+      event_type: 'batch_complete',
+      details: { total, success: successCount, error: errorCount, skipped: skippedCount },
+    }).then(({ error }) => {
+      if (error) console.warn('[batch] agent_events insert failed:', error.message);
+    });
+  }
+}
+
 app.post('/process/batch', processLimiter, async (req: Request, res: Response) => {
   const { urls, source_type: bodySourceType } = req.body as { urls?: unknown; source_type?: string };
 
@@ -786,27 +856,36 @@ app.post('/process/batch', processLimiter, async (req: Request, res: Response) =
     return;
   }
 
+  const urlList = urls as string[];
+
   const settled = await Promise.allSettled(
-    (urls as string[]).map(async (url) => {
+    urlList.map(async (url) => {
       if (!url || typeof url !== 'string' || !url.startsWith('http')) {
-        throw new Error('Invalid URL');
+        // 4xx — no retry, no snapshot
+        return { url, status: 'error' as const, error: 'Invalid URL' };
       }
       const source = detectSource(url, bodySourceType);
-      const result = await fullPipeline(url, source);
-      if ('duplicate' in result) return { url, status: 'skipped' as const, reason: 'duplicate' };
-      if ('youtube_unavailable' in result) return { url, status: 'skipped' as const, reason: 'youtube_unavailable' };
-      return { url, status: 'success' as const, knowledge_count: result.analysis.knowledge_items.length };
+      const r = await processBatchUrl(url, source);
+      // Write error snapshot for failed/skipped (success is written inside runPipeline)
+      if (r.status === 'error') {
+        writeContextSnapshot(url, source, 0, 0, { knowledge_items: [], summary: '', overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'error', language: 'other' }, Date.now(), r.error).catch(() => {});
+      }
+      return r;
     })
   );
 
-  const results = settled.map((s, i) => {
-    if (s.status === 'fulfilled') return s.value;
-    return { url: (urls as string[])[i] ?? '', status: 'error' as const, error: s.reason instanceof Error ? s.reason.message : String(s.reason) };
-  });
+  const results = settled.map((s, i) =>
+    s.status === 'fulfilled' ? s.value : { url: urlList[i] ?? '', status: 'error' as const, error: s.reason instanceof Error ? s.reason.message : String(s.reason) }
+  );
 
   const successCount = results.filter(r => r.status === 'success').length;
   const skippedCount = results.filter(r => r.status === 'skipped').length;
   const errorCount   = results.filter(r => r.status === 'error').length;
+
+  // Batch summary snapshot + notification (non-blocking)
+  writeBatchSummary(urlList.length, successCount, errorCount, skippedCount).catch((e) => {
+    console.warn('[batch] writeBatchSummary failed:', e instanceof Error ? e.message : String(e));
+  });
 
   res.json({ success: true, results, summary: { success: successCount, skipped: skippedCount, errors: errorCount } });
 });
