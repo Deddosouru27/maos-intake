@@ -1135,6 +1135,132 @@ app.post('/auto-discover', async (req: Request, res: Response) => {
   res.json({ discovered: total, by_topic: counts });
 });
 
+app.post('/auto-triage', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!pitstopUrl || !pitstopKey || !anthropicKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+  const { default: AnthropicClient } = await import('@anthropic-ai/sdk');
+  const anthropic = new AnthropicClient({ apiKey: anthropicKey });
+
+  const BATCH = 20;
+  const TRIAGE_SYSTEM = `Ты CEO MAOS. Наш стек: Node.js, TypeScript, Supabase, Claude/Haiku, React+Vite+Tailwind, Telegram Bot API, pgvector, Vercel.
+Цель MAOS: мультиагентная автономная система разработки.
+
+Для каждой идеи прими решение:
+- "approve": полезно, релевантно нашему стеку, оставить для изучения
+- "reject": мусор / не наш стек / описание а не действие / generic мотивация / уже делаем
+- "task": actionable ПРЯМО СЕЙЧАС, конкретно и реализуемо за 1-3 дня
+
+Верни ТОЛЬКО JSON массив (без markdown): [{"id":"...","decision":"approve"|"reject"|"task","reason":"1 sentence"}]
+Количество элементов ДОЛЖНО совпадать с входным массивом.`;
+
+  let totalApproved = 0;
+  let totalRejected = 0;
+  let totalTasks = 0;
+  let totalErrors = 0;
+  let offset = 0;
+  let hasMore = true;
+
+  while (hasMore) {
+    const { data: ideas, error: fetchErr } = await sb
+      .from('ideas')
+      .select('id, content, relevance, source_type')
+      .or("status.eq.new,status.is.null")
+      .order('created_at', { ascending: true })
+      .range(offset, offset + BATCH - 1);
+
+    if (fetchErr || !ideas || ideas.length === 0) { hasMore = false; break; }
+
+    const input = ideas.map(i => ({
+      id: i.id,
+      content: (i.content as string).slice(0, 200),
+      relevance: i.relevance ?? 'unknown',
+    }));
+
+    let decisions: { id: string; decision: string; reason: string }[] = [];
+    try {
+      const msg = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 2048,
+        system: TRIAGE_SYSTEM,
+        messages: [{ role: 'user', content: JSON.stringify(input) }],
+      });
+      const raw = (msg.content[0] as { type: string; text: string }).text.trim();
+      const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+      const parsed = JSON.parse(cleaned);
+      decisions = Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      console.error('[auto-triage] Haiku parse error:', e instanceof Error ? e.message : String(e));
+      totalErrors += ideas.length;
+      offset += BATCH;
+      continue;
+    }
+
+    for (const d of decisions) {
+      if (!d.id || !d.decision) continue;
+      if (d.decision === 'reject') {
+        await sb.from('ideas').update({
+          status: 'rejected',
+          rejection_reason: d.reason ?? null,
+          reviewed_at: new Date().toISOString(),
+          reviewed_by: 'haiku-auto-triage',
+        }).eq('id', d.id);
+        totalRejected++;
+      } else if (d.decision === 'task') {
+        const idea = ideas.find(i => i.id === d.id);
+        const title = (idea?.content as string ?? '').slice(0, 120);
+        await sb.from('tasks').insert({
+          title,
+          description: `Auto-triaged from idea.\n\nReason: ${d.reason ?? ''}`,
+          status: 'backlog',
+          priority: 'medium',
+          source: 'idea_triage',
+          created_by: 'haiku-auto-triage',
+        });
+        await sb.from('ideas').update({
+          status: 'accepted',
+          converted_to_task: true,
+          reviewed_at: new Date().toISOString(),
+          reviewed_by: 'haiku-auto-triage',
+        }).eq('id', d.id);
+        totalTasks++;
+      } else {
+        await sb.from('ideas').update({
+          status: 'approved',
+          reviewed_at: new Date().toISOString(),
+          reviewed_by: 'haiku-auto-triage',
+        }).eq('id', d.id);
+        totalApproved++;
+      }
+    }
+
+    console.log(`[auto-triage] batch offset=${offset}: ${decisions.length} decisions`);
+    offset += BATCH;
+    if (ideas.length < BATCH) hasMore = false;
+  }
+
+  const report = `Auto-triage: ${totalApproved} approved, ${totalRejected} rejected, ${totalTasks} → tasks${totalErrors > 0 ? `, ${totalErrors} errors` : ''}`;
+  console.log('[auto-triage]', report);
+
+  // Log to agent_action_log
+  try {
+    await sb.from('agent_action_log').insert({
+      agent: 'intaker', action: 'auto_triage', status: 'done',
+      details: { approved: totalApproved, rejected: totalRejected, tasks: totalTasks, errors: totalErrors },
+      repo: 'maos-intake',
+    });
+  } catch { /* non-fatal */ }
+
+  res.json({ success: true, approved: totalApproved, rejected: totalRejected, tasks: totalTasks, errors: totalErrors, report });
+});
+
 app.get('/heartbeat', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
