@@ -81,12 +81,13 @@ interface ProcessBody {
 }
 
 function detectSource(url: string, provided?: string): Source {
-  // Only trust provided if it's a known valid source — rejects 'link', 'url', garbage
-  if (provided && VALID_SOURCES.has(provided)) return provided as Source;
+  // URL patterns are authoritative — always checked first
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
-  if (url.includes('twitter.com') || url.includes('x.com') || url.includes('threads.net'))
-    return 'thread';
   if (url.includes('instagram.com')) return 'instagram';
+  if (url.includes('twitter.com') || url.includes('x.com') || url.includes('threads.net')) return 'thread';
+  if (url.includes('habr.com') || url.includes('medium.com') || url.includes('dev.to')) return 'article';
+  // Fall back to caller hint only if it's a known valid value
+  if (provided && VALID_SOURCES.has(provided)) return provided as Source;
   return 'article';
 }
 
@@ -579,7 +580,7 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
     return;
   }
 
-  const source = detectSource(url, providedSource);
+  const source = detectSource(url, providedSource ?? bodySourceType);
 
   try {
     const result = await fullPipeline(url, source);
