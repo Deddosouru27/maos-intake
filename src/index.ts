@@ -1402,16 +1402,28 @@ Triage опирается на цели, потребности, задачи и
       continue;
     }
 
+    const ideaId = idea.id as string;
+    const newStatus = decision === 'reject' ? 'rejected' : decision === 'needs_clarification' ? 'pending' : 'approved';
     const updatePayload: Record<string, unknown> = {
-      status: decision === 'reject' ? 'rejected' : decision === 'needs_clarification' ? 'pending' : 'approved',
+      status: newStatus,
       reviewed_by: 'haiku-triage',
       reviewed_at: new Date().toISOString(),
     };
     if (decision === 'reject') updatePayload.rejection_reason = reason;
 
-    await sb.from('ideas').update(updatePayload).eq('id', idea.id);
+    const { error: updateErr, data: updateData } = await sb
+      .from('ideas')
+      .update(updatePayload)
+      .eq('id', ideaId)
+      .select('id, status, reviewed_by');
 
-    details.push({ id: idea.id as string, content: content.slice(0, 80), decision, reason });
+    if (updateErr) {
+      console.error(`[triage] ❌ UPDATE failed for idea ${ideaId}: ${updateErr.message} (code: ${updateErr.code})`);
+    } else {
+      console.log(`[triage] ✅ UPDATE ok for idea ${ideaId}: status=${newStatus}, rows=${JSON.stringify(updateData)}`);
+    }
+
+    details.push({ id: ideaId, content: content.slice(0, 80), decision, reason });
     if (decision === 'approve') approved++;
     else if (decision === 'reject') rejected++;
     else needsClarification++;
