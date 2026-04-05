@@ -564,13 +564,23 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     const analysis = await analyzeWithChunking(rawText, url);
     console.log(`[PIPELINE] 6. Analysis — items: ${analysis.knowledge_items.length}, immediate: ${analysis.overall_immediate.toFixed(2)}, strategic: ${analysis.overall_strategic.toFixed(2)}, category: ${analysis.category}`);
 
-    if (analysis.category === 'parse_error') {
-      console.error('[INTAKE] Parse error — saving parse_error status, skipping pipeline');
+    if (analysis.category === 'parse_error' || analysis.category === 'empty_response') {
+      const isEmpty = analysis.category === 'empty_response';
+      const errLabel = isEmpty ? 'empty_response' : 'parse_error';
+      const errMsg = isEmpty ? 'Haiku returned empty response' : 'Haiku returned non-JSON';
+      console.error(`[INTAKE] ${errLabel} — skipping pipeline`);
       if (ingestedId) {
-        await updateIngestedDone(ingestedId, analysis, 'parse_error', 0, false, 'parse_error');
+        await updateIngestedDone(ingestedId, analysis, errLabel, 0, false, errLabel);
       }
-      await writeIntakeLog({ url, stage: 'parse_error', haiku_items: 0, duration_ms: Date.now() - startTime, error: 'Haiku returned non-JSON' });
-      return { notification: '⚠️ Haiku вернул не-JSON. Записано как parse_error.', analysis, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, smartCrudUpdates: 0, haikuRaw: analysis._haiku_raw ?? null } };
+      // Log to agent_events for observability
+      if (pitstopUrl && pitstopKey) {
+        mkClient(pitstopUrl, pitstopKey).from('agent_events').insert({
+          event_type: 'llm_error',
+          details: { url, reason: errLabel, error: errMsg },
+        }).then(({ error }) => { if (error) console.warn('[agent_events] insert failed:', error.message); });
+      }
+      await writeIntakeLog({ url, stage: errLabel, haiku_items: 0, duration_ms: Date.now() - startTime, error: errMsg });
+      return { notification: `⚠️ ${errMsg}. Записано как ${errLabel}.`, analysis, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, smartCrudUpdates: 0, haikuRaw: analysis._haiku_raw ?? null } };
     }
 
     const diag = await runPipeline(ingestedId, analysis, url, source, contentHash);
@@ -1019,7 +1029,8 @@ app.post('/summarize', async (req: Request, res: Response) => {
   const words = maxLength ?? 200;
 
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  // API Cost Protection: max 1 retry. See incident 29.03.
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 1 });
 
   try {
     const message = await client.messages.create({
@@ -1175,7 +1186,8 @@ async function runEntityBackfill(): Promise<{ processed: number; remaining: numb
   const { createClient: mkSupabase } = await import('@supabase/supabase-js');
   const AnthropicSDK = (await import('@anthropic-ai/sdk')).default;
   const supabase = mkSupabase(pitstopUrl, pitstopKey);
-  const anthropic = new AnthropicSDK({ apiKey: anthropicKey });
+  // API Cost Protection: max 1 retry. See incident 29.03.
+  const anthropic = new AnthropicSDK({ apiKey: anthropicKey, maxRetries: 1 });
 
   // Match both NULL and empty array for entity_objects
   const { data: rows, error } = await supabase
@@ -1332,7 +1344,8 @@ app.post('/triage', async (req: Request, res: Response) => {
   const { createClient: mkSb } = await import('@supabase/supabase-js');
   const sb = mkSb(pitstopUrl, pitstopKey);
   const { default: AnthropicClient } = await import('@anthropic-ai/sdk');
-  const anthropic = new AnthropicClient({ apiKey: anthropicKey });
+  // API Cost Protection: max 1 retry. See incident 29.03.
+  const anthropic = new AnthropicClient({ apiKey: anthropicKey, maxRetries: 1 });
 
   // Fetch few-shot calibration examples
   let fewShotBlock = '';
@@ -1464,7 +1477,8 @@ app.post('/auto-triage', async (_req: Request, res: Response) => {
   const { createClient: mkSb } = await import('@supabase/supabase-js');
   const sb = mkSb(pitstopUrl, pitstopKey);
   const { default: AnthropicClient } = await import('@anthropic-ai/sdk');
-  const anthropic = new AnthropicClient({ apiKey: anthropicKey });
+  // API Cost Protection: max 1 retry. See incident 29.03.
+  const anthropic = new AnthropicClient({ apiKey: anthropicKey, maxRetries: 1 });
 
   const BATCH = 20;
   const TRIAGE_SYSTEM = `Ты CEO MAOS. Наш стек: Node.js, TypeScript, Supabase, Claude/Haiku, React+Vite+Tailwind, Telegram Bot API, pgvector, Vercel.

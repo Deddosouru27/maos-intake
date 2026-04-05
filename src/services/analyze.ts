@@ -2,7 +2,28 @@ import Anthropic from '@anthropic-ai/sdk';
 import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel, EntityObject } from '../types';
 import { getFullContext, buildContextString } from './projectContext';
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// API Cost Protection: max 1 retry. See incident 29.03.
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 1 });
+
+// Circuit breaker state — reset on process restart
+let consecutiveEmptyResponses = 0;
+const CIRCUIT_BREAKER_THRESHOLD = 3;
+
+async function logQuarantine(source: string, reason: string): Promise<void> {
+  const ts = new Date().toISOString();
+  console.error(`[QUARANTINE] ${ts} source=${source} reason=${reason} consecutive=${consecutiveEmptyResponses}`);
+  const url = process.env.PITSTOP_SUPABASE_URL;
+  const key = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!url || !key) return;
+  try {
+    const { createClient } = await import('@supabase/supabase-js');
+    const sb = createClient(url, key);
+    await sb.from('agent_events').insert({
+      event_type: 'llm_quarantine',
+      details: { source, reason, consecutive: consecutiveEmptyResponses, ts },
+    });
+  } catch { /* non-blocking */ }
+}
 
 const SYSTEM_PROMPT = `You are a knowledge extraction engine. Extract insights from content.
 ALWAYS respond in Russian. All content, business_value, and summary must be in Russian language.
@@ -263,6 +284,39 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
 
   const raw = message.content[0].type === 'text' ? message.content[0].text : '';
   console.log('[HAIKU] Raw response first 200 chars:', raw.slice(0, 200));
+
+  // Circuit breaker: empty or near-empty response — do NOT retry, do NOT save
+  if (raw.trim().length < 20) {
+    consecutiveEmptyResponses++;
+    await logQuarantine(source, 'empty_response');
+    if (consecutiveEmptyResponses >= CIRCUIT_BREAKER_THRESHOLD) {
+      const alertText = `⚠️ Circuit breaker: ${CIRCUIT_BREAKER_THRESHOLD} empty LLM responses in a row. Pipeline halted.`;
+      console.error(`[CIRCUIT_BREAKER] ${alertText}`);
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (token && chatId) {
+        fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: alertText }),
+        }).catch(() => { /* non-blocking */ });
+      }
+      const err = new Error(alertText) as Error & { circuitBreaker: true };
+      err.circuitBreaker = true;
+      throw err;
+    }
+    return {
+      summary: 'empty_response',
+      knowledge_items: [],
+      overall_immediate: 0,
+      overall_strategic: 0,
+      priority_signal: false,
+      priority_reason: 'empty_response',
+      category: 'empty_response',
+      language: 'other',
+    };
+  }
+  consecutiveEmptyResponses = 0; // reset on valid response
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const compact = parseHaikuJSON(raw) as any;
