@@ -492,22 +492,32 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     }
     console.log('[PIPELINE] URL dedup passed');
 
-    console.log('[PIPELINE] 1. Fetching content...');
-    const fetched = await fetchRawContent(url, source);
+    // YouTube + Gemini: skip transcript fetch entirely — Gemini reads video natively
+    const useGemini = source === 'youtube' && !!process.env.GEMINI_API_KEY;
+    let rawText = '';
+    let title: string | undefined;
 
-    if (fetched.youtube_unavailable) {
-      return { youtube_unavailable: true };
+    if (!useGemini) {
+      console.log('[PIPELINE] 1. Fetching content...');
+      const fetched = await fetchRawContent(url, source);
+
+      if (fetched.youtube_unavailable) {
+        return { youtube_unavailable: true };
+      }
+
+      rawText = fetched.rawText;
+      title = fetched.title;
+      console.log(`[PIPELINE] 2. Fetched ${rawText.length} chars, title: ${title ?? 'none'}`);
+
+      if (rawText.length < 30) {
+        console.error('[PIPELINE] Content too short or empty — aborting, rawText:', JSON.stringify(rawText));
+        return { notification: '⚠️ Контент не получен (пустой ответ от источника)', analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'empty', language: 'other' }, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, smartCrudUpdates: 0, haikuRaw: null } };
+      }
+    } else {
+      console.log('[PIPELINE] 1. Gemini path — skipping transcript fetch');
     }
 
-    const { rawText, title } = fetched;
-    console.log(`[PIPELINE] 2. Fetched ${rawText.length} chars, title: ${title ?? 'none'}`);
-
-    if (rawText.length < 30) {
-      console.error('[PIPELINE] Content too short or empty — aborting, rawText:', JSON.stringify(rawText));
-      return { notification: '⚠️ Контент не получен (пустой ответ от источника)', analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'empty', language: 'other' }, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, smartCrudUpdates: 0, haikuRaw: null } };
-    }
-
-    const contentHash = computeHash(rawText);
+    const contentHash = computeHash(rawText || url);
     console.log('[PIPELINE] 3. Content hash:', contentHash.slice(0, 8));
 
     let context;
@@ -565,13 +575,17 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
 
     // YouTube: try Gemini first (native video understanding — no transcript needed)
     // Fallback: existing Haiku pipeline on any failure
-    if (source === 'youtube' && process.env.GEMINI_API_KEY) {
+    if (useGemini) {
       try {
         const { analyzeYouTubeWithGemini } = await import('./services/gemini');
         analysis = await analyzeYouTubeWithGemini(url);
         console.log(`[PIPELINE] 5a. Gemini ok — items: ${analysis.knowledge_items.length}`);
       } catch (geminiErr) {
         console.warn('[PIPELINE] Gemini failed, falling back to Haiku:', geminiErr instanceof Error ? geminiErr.message : String(geminiErr));
+        if (rawText.length < 30) {
+          // No transcript available and Gemini failed — truly unavailable
+          return { youtube_unavailable: true };
+        }
         analysis = await analyzeWithChunking(rawText, url);
       }
     } else {
