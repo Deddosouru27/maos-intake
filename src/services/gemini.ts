@@ -109,10 +109,11 @@ export async function analyzeYouTubeWithGemini(url: string): Promise<BrainAnalys
 
   console.log('[GEMINI] Analyzing YouTube URL:', url);
 
+  // Gemini natively supports YouTube URLs via fileData (Gemini 1.5+)
   const result = await model.generateContent([
     {
       fileData: {
-        mimeType: 'video/mp4',
+        mimeType: 'video/*',
         fileUri: url,
       },
     },
