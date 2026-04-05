@@ -560,8 +560,23 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     const ingestedId = await insertIngestedPending(rawText, url, source, title, contentHash);
     console.log('[PIPELINE] 4.5. ingestedId:', ingestedId);
 
-    console.log('[PIPELINE] 5. Haiku analysis...');
-    const analysis = await analyzeWithChunking(rawText, url);
+    console.log('[PIPELINE] 5. Analysis...');
+    let analysis: BrainAnalysis;
+
+    // YouTube: try Gemini first (native video understanding — no transcript needed)
+    // Fallback: existing Haiku pipeline on any failure
+    if (source === 'youtube' && process.env.GEMINI_API_KEY) {
+      try {
+        const { analyzeYouTubeWithGemini } = await import('./services/gemini');
+        analysis = await analyzeYouTubeWithGemini(url);
+        console.log(`[PIPELINE] 5a. Gemini ok — items: ${analysis.knowledge_items.length}`);
+      } catch (geminiErr) {
+        console.warn('[PIPELINE] Gemini failed, falling back to Haiku:', geminiErr instanceof Error ? geminiErr.message : String(geminiErr));
+        analysis = await analyzeWithChunking(rawText, url);
+      }
+    } else {
+      analysis = await analyzeWithChunking(rawText, url);
+    }
     console.log(`[PIPELINE] 6. Analysis — items: ${analysis.knowledge_items.length}, immediate: ${analysis.overall_immediate.toFixed(2)}, strategic: ${analysis.overall_strategic.toFixed(2)}, category: ${analysis.category}`);
 
     if (analysis.category === 'parse_error' || analysis.category === 'empty_response') {
