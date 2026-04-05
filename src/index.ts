@@ -276,6 +276,7 @@ app.get('/health', async (req: Request, res: Response) => {
     uptime: 'ok',
     services: {
       anthropic: key('ANTHROPIC_API_KEY'),
+      gemini: key('GEMINI_API_KEY'),
       groq: key('GROQ_API_KEY'),
       openai: key('OPENAI_API_KEY'),
       pitstop_supabase: key('PITSTOP_SUPABASE_ANON_KEY'),
