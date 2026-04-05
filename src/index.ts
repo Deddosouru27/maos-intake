@@ -327,15 +327,27 @@ async function fetchRawContent(
     return { rawText: '' };
   }
 
-  // Jina Reader first — handles paywalls and JS-heavy sites better
-  const jinaResult = await fetchWithJina(url);
-  if (jinaResult && jinaResult.text.length > 100) {
-    console.log('[INTAKE] Jina ok, length:', jinaResult.text.length);
-    return { rawText: jinaResult.text, title: jinaResult.title };
+  // Sites that serve static HTML well — skip Jina to avoid sidebar/nav extraction
+  const PREFER_DIRECT_DOMAINS = new Set(['habr.com', 'dev.to', 'vc.ru', 'tproger.ru', 'vas3k.ru', 'tinkoff.ru']);
+  let preferDirect = false;
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    preferDirect = PREFER_DIRECT_DOMAINS.has(hostname);
+  } catch { /* invalid URL, fall through */ }
+
+  if (!preferDirect) {
+    // Jina Reader first — handles paywalls and JS-heavy sites better
+    const jinaResult = await fetchWithJina(url);
+    if (jinaResult && jinaResult.text.length > 100) {
+      console.log('[INTAKE] Jina ok, length:', jinaResult.text.length);
+      return { rawText: jinaResult.text, title: jinaResult.title };
+    }
+    console.log('[INTAKE] Jina failed, falling back to readability');
+  } else {
+    console.log('[INTAKE] Skipping Jina for direct-extraction domain, using cheerio');
   }
 
-  // Fallback to readability
-  console.log('[INTAKE] Using readability fallback');
+  // Cheerio-based extraction (removes sidebar/nav/footer)
   const { text, title } = await fetchArticle(url);
   return { rawText: text, title };
 }
