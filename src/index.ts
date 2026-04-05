@@ -557,7 +557,7 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
         const { createClient } = await import('@supabase/supabase-js');
         if (pitstopUrl && pitstopKey) {
           const sb = createClient(pitstopUrl, pitstopKey);
-          const { data } = await sb.from('ingested_content').select('id').ilike('source_url', `%${videoId}%`).limit(1);
+          const { data } = await sb.from('ingested_content').select('id').ilike('source_url', `%${videoId}%`).eq('processing_status', 'done').limit(1);
           if (data && data.length > 0) {
             console.log('[PIPELINE] YouTube video ID dedup HIT:', videoId);
             return { duplicate: true };
