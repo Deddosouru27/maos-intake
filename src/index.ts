@@ -679,12 +679,12 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
 
     // ── Pre-filter: deterministic checks before any LLM call ──────────────────
     if (!useGemini && rawText.length > 0) {
-      // 1. Word count < 50 → skip (not enough content to extract anything useful)
+      // 1. Word count < 100 → skip (not enough content to extract anything useful)
       const wordCount = rawText.trim().split(/\s+/).filter(Boolean).length;
-      if (wordCount < 50) {
-        console.log(`[PRE-FILTER] word_count=${wordCount} < 50 — skipping LLM`);
+      if (wordCount < 100) {
+        console.log(`[PRE-FILTER] word_count=${wordCount} < 100 — skipping LLM`);
         await writeIntakeLog({ url, stage: 'pre_filter_skip', duration_ms: Date.now() - startTime, error: `word_count=${wordCount}` });
-        return { notification: `⏭ Pre-filter: слишком мало контента (${wordCount} слов). LLM не вызван.`, analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'pre_filter_skip', language: 'other' }, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, smartCrudUpdates: 0, haikuRaw: null } };
+        return { notification: `⏭ Pre-filter: слишком мало контента (${wordCount} слов, минимум 100). LLM не вызван.`, analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'pre_filter_skip', language: 'other' }, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, smartCrudUpdates: 0, haikuRaw: null } };
       }
 
       // 2. Language detection: skip if not ru/en
