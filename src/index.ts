@@ -670,11 +670,22 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
         analysis = await analyzeYouTubeWithGemini(url);
         console.log(`[PIPELINE] 5a. Gemini ok — items: ${analysis.knowledge_items.length}`);
       } catch (geminiErr) {
-        console.warn('[PIPELINE] Gemini failed, falling back to Haiku:', geminiErr instanceof Error ? geminiErr.message : String(geminiErr));
+        console.warn('[PIPELINE] Gemini failed:', geminiErr instanceof Error ? geminiErr.message : String(geminiErr));
+        // Secondary fallback: try transcript
         if (rawText.length < 30) {
-          // No transcript available and Gemini failed — truly unavailable
-          return { youtube_unavailable: true };
+          console.log('[PIPELINE] Gemini failed + no rawText — trying transcript fetch');
+          try {
+            const transcriptFetched = await fetchRawContent(url, source);
+            if (transcriptFetched.youtube_unavailable || transcriptFetched.rawText.length < 30) {
+              return { youtube_unavailable: true };
+            }
+            rawText = transcriptFetched.rawText;
+            title = transcriptFetched.title;
+          } catch {
+            return { youtube_unavailable: true };
+          }
         }
+        console.log('[PIPELINE] Falling back to Haiku with transcript:', rawText.length, 'chars');
         analysis = await analyzeWithChunking(rawText, url);
       }
     } else {
