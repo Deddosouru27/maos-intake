@@ -6,7 +6,7 @@ import { createClient } from '@supabase/supabase-js';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent, analyzeWithChunking } from './services/analyze';
-import { insertIngestedPending, updateIngestedDone, quarantineIngestedItem, saveExtractedKnowledge, saveToPitstop, upsertEntityGraph } from './services/pitstop';
+import { checkSourceUrlDedup, insertIngestedPending, updateIngestedDone, quarantineIngestedItem, saveExtractedKnowledge, saveToPitstop, upsertEntityGraph } from './services/pitstop';
 import { rerankItems } from './services/rerank';
 import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
@@ -592,28 +592,17 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
   try {
     console.log('[PIPELINE] Starting for URL:', url, '| source:', source);
 
-    // URL dedup: skip if same URL was already ingested successfully (all history)
-    const { createClient: mkClient } = await import('@supabase/supabase-js');
-    const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
-    const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
-    if (pitstopUrl && pitstopKey) {
-      const sb = mkClient(pitstopUrl, pitstopKey);
-      const { data: existing, error: dedupErr } = await sb
-        .from('ingested_content')
-        .select('id')
-        .eq('source_url', url)
-        .eq('processing_status', 'done')
-        .limit(1);
-      console.log('[PIPELINE] URL dedup check — done rows:', existing?.length ?? 0, dedupErr ? `err: ${dedupErr.message}` : 'ok');
-      if (existing && existing.length > 0) {
-        console.log('[PIPELINE] URL dedup HIT — skipping:', url);
-        await writeIntakeLog({ url, stage: 'dedup_skip', duration_ms: Date.now() - startTime });
-        return { duplicate: true };
-      }
-    } else {
-      console.warn('[PIPELINE] PITSTOP env not set — skipping URL dedup');
+    // URL dedup: skip if same URL exists in ingested_content (done, processing, quarantined)
+    const urlDedup = await checkSourceUrlDedup(url);
+    if (urlDedup.exists) {
+      console.log(`[PIPELINE] URL dedup HIT — skipping: ${url} (status: ${urlDedup.status})`);
+      await writeIntakeLog({ url, stage: 'dedup_skip', duration_ms: Date.now() - startTime });
+      return { duplicate: true };
     }
     console.log('[PIPELINE] URL dedup passed');
+
+    const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+    const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
 
     // YouTube + Gemini: skip transcript fetch entirely — Gemini reads video natively
     const useGemini = source === 'youtube' && !!process.env.GEMINI_API_KEY;
@@ -659,7 +648,7 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     }
     // DB fallback — cache only holds last 100 done records
     if (pitstopUrl && pitstopKey) {
-      const sb = mkClient(pitstopUrl, pitstopKey);
+      const sb = createClient(pitstopUrl, pitstopKey);
       const { data: hashRow } = await sb
         .from('ingested_content')
         .select('id')
@@ -677,7 +666,6 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     if (source === 'youtube') {
       const videoId = extractVideoId(url);
       if (videoId && context.recentHashes.length > 0) {
-        const { createClient } = await import('@supabase/supabase-js');
         if (pitstopUrl && pitstopKey) {
           const sb = createClient(pitstopUrl, pitstopKey);
           const { data } = await sb.from('ingested_content').select('id').ilike('source_url', `%${videoId}%`).eq('processing_status', 'done').limit(1);
@@ -770,10 +758,10 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
       }
       // Log to agent_events for observability
       if (pitstopUrl && pitstopKey) {
-        mkClient(pitstopUrl, pitstopKey).from('agent_events').insert({
+        createClient(pitstopUrl, pitstopKey).from('agent_events').insert({
           event_type: 'llm_error',
           details: { url, reason: errLabel, error: errMsg },
-        }).then(({ error }) => { if (error) console.warn('[agent_events] insert failed:', error.message); });
+        }).then(({ error: evtErr }) => { if (evtErr) console.warn('[agent_events] insert failed:', evtErr.message); });
       }
       await writeIntakeLog({ url, stage: errLabel, haiku_items: 0, duration_ms: Date.now() - startTime, error: errMsg });
       return { notification: `⚠️ ${errMsg}. Записано как ${errLabel}.`, analysis, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, smartCrudUpdates: 0, haikuRaw: analysis._haiku_raw ?? null } };
@@ -1014,6 +1002,24 @@ app.post('/batch', processLimiter, async (req: Request, res: Response) => {
   for (const url of urls) {
     const source = detectSource(url);
     try {
+      // URL dedup before fetching content (saves network + API cost)
+      const urlDedup = await checkSourceUrlDedup(url);
+      if (urlDedup.exists) {
+        results.push({
+          summary: '',
+          knowledge_items: [],
+          overall_immediate: 0,
+          overall_strategic: 0,
+          priority_signal: false,
+          priority_reason: '',
+          category: 'other',
+          language: 'other',
+          duplicate: true,
+          notification: `♻️ Этот URL уже обрабатывался (${urlDedup.status})`,
+        });
+        continue;
+      }
+
       const { rawText, title } = await fetchRawContent(url, source);
       const contentHash = computeHash(rawText);
 
