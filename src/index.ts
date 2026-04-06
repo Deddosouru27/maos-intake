@@ -582,7 +582,7 @@ async function runPipeline(
 }
 
 interface PipelineDiag { haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number; smartCrudUpdates: number; haikuRaw: string | null }
-async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis; diag: PipelineDiag } | { duplicate: true } | { youtube_unavailable: true }> {
+async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis; diag: PipelineDiag } | { duplicate: true } | { youtube_unavailable: true; _gemini_error?: string }> {
   // 45s hard timeout — Vercel maxDuration is 60s, leaves buffer for network
   const timeoutId = setTimeout(() => {
     throw new Error('[INTAKE] Pipeline timeout (45s)');
@@ -714,14 +714,14 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
             const transcriptFetched = await fetchRawContent(url, source);
             if (transcriptFetched.youtube_unavailable || transcriptFetched.rawText.length < 30) {
               if (ingestedId) await updateIngestedDone(ingestedId, failedAnalysis, 'youtube_unavailable', 0, false, 'failed');
-              return { youtube_unavailable: true };
+              return { youtube_unavailable: true, _gemini_error: geminiErrMsg.slice(0, 300) };
             }
             rawText = transcriptFetched.rawText;
             title = transcriptFetched.title;
           } catch (transcriptErr) {
             console.warn('[PIPELINE] Transcript fallback also failed:', transcriptErr instanceof Error ? transcriptErr.message : String(transcriptErr));
             if (ingestedId) await updateIngestedDone(ingestedId, failedAnalysis, 'failed', 0, false, geminiErrMsg.slice(0, 200));
-            return { youtube_unavailable: true };
+            return { youtube_unavailable: true, _gemini_error: geminiErrMsg.slice(0, 300) };
           }
         }
         console.log('[PIPELINE] Falling back to Haiku with transcript:', rawText.length, 'chars');
@@ -839,6 +839,7 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
         knowledge_count: 0,
         source_url: url,
         notification: '🎬 YouTube временно недоступен на этом сервере. Скопируй транскрипт через youtubetotranscript.com и отправь текстом',
+        _gemini_error: result._gemini_error,
         _retry: { attempts },
       });
     } else if ('duplicate' in result) {
