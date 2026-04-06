@@ -1158,6 +1158,35 @@ app.post('/process/batch', processLimiter, async (req: Request, res: Response) =
   res.json({ success: true, results, summary: { success: successCount, skipped: skippedCount, errors: errorCount } });
 });
 
+app.get('/api/rejected', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+  const { createClient } = await import('@supabase/supabase-js');
+  const sb = createClient(pitstopUrl, pitstopKey);
+  const { data, error } = await sb
+    .from('intake_logs')
+    .select('url, error, created_at')
+    .eq('stage', 'pre_filter_skip')
+    .order('created_at', { ascending: false })
+    .limit(50);
+  if (error) {
+    res.status(500).json({ error: error.message });
+    return;
+  }
+  res.json({
+    count: data?.length ?? 0,
+    rejected: (data ?? []).map((r) => ({
+      source_url: r.url,
+      reason: r.error,
+      created_at: r.created_at,
+    })),
+  });
+});
+
 app.get('/stats', async (_req: Request, res: Response) => {
   const { createClient } = await import('@supabase/supabase-js');
 
