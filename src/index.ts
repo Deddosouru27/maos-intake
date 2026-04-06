@@ -670,18 +670,23 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
         analysis = await analyzeYouTubeWithGemini(url);
         console.log(`[PIPELINE] 5a. Gemini ok — items: ${analysis.knowledge_items.length}`);
       } catch (geminiErr) {
-        console.warn('[PIPELINE] Gemini failed:', geminiErr instanceof Error ? geminiErr.message : String(geminiErr));
+        const geminiErrMsg = geminiErr instanceof Error ? geminiErr.message : String(geminiErr);
+        console.warn('[PIPELINE] Gemini failed:', geminiErrMsg);
+        const failedAnalysis: BrainAnalysis = { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'failed', language: 'other' };
         // Secondary fallback: try transcript
         if (rawText.length < 30) {
           console.log('[PIPELINE] Gemini failed + no rawText — trying transcript fetch');
           try {
             const transcriptFetched = await fetchRawContent(url, source);
             if (transcriptFetched.youtube_unavailable || transcriptFetched.rawText.length < 30) {
+              if (ingestedId) await updateIngestedDone(ingestedId, failedAnalysis, 'youtube_unavailable', 0, false, 'failed');
               return { youtube_unavailable: true };
             }
             rawText = transcriptFetched.rawText;
             title = transcriptFetched.title;
-          } catch {
+          } catch (transcriptErr) {
+            console.warn('[PIPELINE] Transcript fallback also failed:', transcriptErr instanceof Error ? transcriptErr.message : String(transcriptErr));
+            if (ingestedId) await updateIngestedDone(ingestedId, failedAnalysis, 'failed', 0, false, geminiErrMsg.slice(0, 200));
             return { youtube_unavailable: true };
           }
         }

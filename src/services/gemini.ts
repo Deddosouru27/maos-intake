@@ -3,7 +3,8 @@ import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel, EntityObject 
 
 // API Cost Protection: max 1 retry. See incident 29.03.
 // Gemini free tier — no retry needed; on fail caller falls back to Haiku pipeline.
-const MODEL_ID = 'gemini-2.0-flash';
+// gemini-1.5-flash has documented YouTube URL support via fileData
+const MODEL_ID = 'gemini-1.5-flash';
 
 const SYSTEM_PROMPT = `You are a knowledge extraction engine analyzing a YouTube video.
 ALWAYS respond in Russian. All content, summary, and insights must be in Russian.
