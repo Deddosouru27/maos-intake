@@ -469,21 +469,20 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
   try {
     console.log('[PIPELINE] Starting for URL:', url, '| source:', source);
 
-    // URL dedup: skip if same URL was ingested successfully in the last 10 minutes
+    // URL dedup: skip if same URL was already ingested successfully (all history)
     const { createClient: mkClient } = await import('@supabase/supabase-js');
     const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
     const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
     if (pitstopUrl && pitstopKey) {
       const sb = mkClient(pitstopUrl, pitstopKey);
-      const { data: recent, error: dedupErr } = await sb
+      const { data: existing, error: dedupErr } = await sb
         .from('ingested_content')
         .select('id')
         .eq('source_url', url)
         .eq('processing_status', 'done')
-        .gte('created_at', new Date(Date.now() - 10 * 60 * 1000).toISOString())
         .limit(1);
-      console.log('[PIPELINE] URL dedup check — recent done rows:', recent?.length ?? 0, dedupErr ? `err: ${dedupErr.message}` : 'ok');
-      if (recent && recent.length > 0) {
+      console.log('[PIPELINE] URL dedup check — done rows:', existing?.length ?? 0, dedupErr ? `err: ${dedupErr.message}` : 'ok');
+      if (existing && existing.length > 0) {
         console.log('[PIPELINE] URL dedup HIT — skipping:', url);
         await writeIntakeLog({ url, stage: 'dedup_skip', duration_ms: Date.now() - startTime });
         return { duplicate: true };
