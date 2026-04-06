@@ -689,6 +689,34 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
       }
     }
 
+    // ── Pre-filter: deterministic checks before any LLM call ──────────────────
+    if (!useGemini && rawText.length > 0) {
+      // 1. Word count < 50 → skip (not enough content to extract anything useful)
+      const wordCount = rawText.trim().split(/\s+/).filter(Boolean).length;
+      if (wordCount < 50) {
+        console.log(`[PRE-FILTER] word_count=${wordCount} < 50 — skipping LLM`);
+        await writeIntakeLog({ url, stage: 'pre_filter_skip', duration_ms: Date.now() - startTime, error: `word_count=${wordCount}` });
+        return { notification: `⏭ Pre-filter: слишком мало контента (${wordCount} слов). LLM не вызван.`, analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'pre_filter_skip', language: 'other' }, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, smartCrudUpdates: 0, haikuRaw: null } };
+      }
+
+      // 2. Language detection: skip if not ru/en
+      // Heuristic: count Cyrillic chars for ru, Latin chars for en
+      const cyrillicCount = (rawText.match(/[\u0400-\u04FF]/g) ?? []).length;
+      const latinCount = (rawText.match(/[a-zA-Z]/g) ?? []).length;
+      const totalAlpha = cyrillicCount + latinCount;
+      const isRu = totalAlpha > 0 && cyrillicCount / totalAlpha > 0.3;
+      const isEn = totalAlpha > 0 && latinCount / totalAlpha > 0.5;
+      if (!isRu && !isEn) {
+        const langRatio = totalAlpha > 0 ? `cy=${Math.round(cyrillicCount/totalAlpha*100)}% la=${Math.round(latinCount/totalAlpha*100)}%` : 'no alpha';
+        console.log(`[PRE-FILTER] language not ru/en (${langRatio}) — skipping LLM`);
+        await writeIntakeLog({ url, stage: 'pre_filter_skip', duration_ms: Date.now() - startTime, error: `lang_mismatch: ${langRatio}` });
+        return { notification: `⏭ Pre-filter: язык не ru/en (${langRatio}). LLM не вызван.`, analysis: { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'pre_filter_skip', language: 'other' }, diag: { haikuItems: 0, itemsToSave: 0, savedItems: 0, dedupSkipped: 0, smartCrudUpdates: 0, haikuRaw: null } };
+      }
+
+      console.log(`[PRE-FILTER] passed — words=${wordCount} cy=${cyrillicCount} la=${latinCount}`);
+    }
+    // ── End pre-filter ────────────────────────────────────────────────────────
+
     console.log('[PIPELINE] 4.5. Inserting ingested_content (pending)...');
     const ingestedId = await insertIngestedPending(rawText, url, source, title, contentHash);
     console.log('[PIPELINE] 4.5. ingestedId:', ingestedId);
