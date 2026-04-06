@@ -1155,6 +1155,7 @@ app.post('/summarize', async (req: Request, res: Response) => {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 1 });
 
   try {
+    console.log(`[INTAKE] Haiku summarize call: max_tokens=1024, text_len=${truncated.length}`);
     const message = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1024,
@@ -1167,6 +1168,7 @@ app.post('/summarize', async (req: Request, res: Response) => {
     });
 
     const raw = message.content[0].type === 'text' ? message.content[0].text : '';
+    console.log(`[INTAKE] Haiku summarize done: in=${message.usage?.input_tokens ?? 0} out=${message.usage?.output_tokens ?? 0}`);
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('No JSON found in Haiku response: ' + raw.substring(0, 100));
     const parsed = JSON.parse(jsonMatch[0]) as {
@@ -1639,9 +1641,10 @@ app.post('/auto-triage', async (_req: Request, res: Response) => {
 
     let decisions: { id: string; decision: string; reason: string }[] = [];
     try {
+      console.log(`[auto-triage] Haiku batch call: max_tokens=1024, items=${input.length}`);
       const msg = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 2048,
+        max_tokens: 1024,
         system: TRIAGE_SYSTEM,
         messages: [{ role: 'user', content: JSON.stringify(input) }],
       });

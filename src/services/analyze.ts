@@ -270,9 +270,11 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
   "entities": ["Supabase", "Claude Code", "MAOS"]
 }`;
 
+  const EXTRACTION_MAX_TOKENS = 1024;
+  console.log(`[INTAKE] Haiku extraction call: max_tokens=${EXTRACTION_MAX_TOKENS}, prompt_len=${userPrompt.length}`);
   const message = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 2048,
+    max_tokens: EXTRACTION_MAX_TOKENS,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: userPrompt }],
   });
@@ -280,7 +282,7 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
   const inputTokens = message.usage?.input_tokens ?? 0;
   const outputTokens = message.usage?.output_tokens ?? 0;
   const cost = (inputTokens * 0.25 + outputTokens * 1.25) / 1_000_000;
-  console.log(`[INTAKE] Haiku cost: $${cost.toFixed(4)} (in:${inputTokens} out:${outputTokens})`);
+  console.log(`[INTAKE] Haiku cost: $${cost.toFixed(4)} (in:${inputTokens} out:${outputTokens} max:${EXTRACTION_MAX_TOKENS})`);
 
   const raw = message.content[0].type === 'text' ? message.content[0].text : '';
   console.log('[HAIKU] Raw response first 200 chars:', raw.slice(0, 200));
