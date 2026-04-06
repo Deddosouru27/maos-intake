@@ -82,6 +82,95 @@ async function writeContextSnapshot(
   }
 }
 
+// --- Retry with backoff (lesson from 29.03 cost incident) ---
+// 30s → 120s backoff, max 2 retries (3 total attempts), then mark failed
+const RETRY_BACKOFFS_MS = [30_000, 120_000] as const;
+const MAX_RETRIES = 2;
+
+interface RetryResult<T> {
+  result: T;
+  attempts: number;
+}
+
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  label: string,
+  isValidationError: (err: unknown) => boolean,
+): Promise<RetryResult<T>> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const result = await fn();
+      if (attempt > 0) {
+        console.log(`[RETRY] ${label} succeeded on attempt ${attempt + 1}/${MAX_RETRIES + 1}`);
+      }
+      return { result, attempts: attempt + 1 };
+    } catch (err) {
+      lastError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+
+      // Validation / 4xx errors — no retry, fail immediately
+      if (isValidationError(err)) {
+        console.error(`[RETRY] ${label} validation error (no retry): ${msg}`);
+        throw err;
+      }
+
+      // Circuit breaker — no retry, fail immediately
+      if (err && typeof err === 'object' && 'circuitBreaker' in err) {
+        console.error(`[RETRY] ${label} circuit breaker tripped (no retry): ${msg}`);
+        throw err;
+      }
+
+      if (attempt < MAX_RETRIES) {
+        const backoffMs = RETRY_BACKOFFS_MS[attempt];
+        console.warn(`[RETRY] ${label} attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: ${msg} — retrying in ${backoffMs / 1000}s`);
+        await new Promise(r => setTimeout(r, backoffMs));
+      } else {
+        console.error(`[RETRY] ${label} exhausted ${MAX_RETRIES + 1} attempts: ${msg}`);
+      }
+    }
+  }
+  throw lastError;
+}
+
+function isPipelineValidationError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.toLowerCase().includes('invalid') || msg.includes('400');
+}
+
+async function markUrlFailed(url: string, error: string, attempts: number): Promise<void> {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) return;
+
+  try {
+    const sb = createClient(pitstopUrl, pitstopKey);
+
+    // Mark any in-progress ingested_content as 'failed'
+    const { data: pending } = await sb
+      .from('ingested_content')
+      .select('id')
+      .eq('source_url', url)
+      .eq('processing_status', 'processing')
+      .limit(1);
+    if (pending && pending.length > 0) {
+      await sb
+        .from('ingested_content')
+        .update({ processing_status: 'failed' })
+        .eq('id', pending[0].id);
+      console.log(`[RETRY] Marked ingested_content ${pending[0].id} as failed`);
+    }
+
+    // Log to agent_events
+    await sb.from('agent_events').insert({
+      event_type: 'pipeline_failed',
+      details: { url, error, attempts, exhausted: true, ts: new Date().toISOString() },
+    });
+  } catch (e) {
+    console.error('[RETRY] markUrlFailed DB write failed:', e instanceof Error ? e.message : String(e));
+  }
+}
+
 async function writeIntakeLog(fields: {
   url: string;
   stage: string;
@@ -688,7 +777,11 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
   const source = detectSource(url, providedSource ?? bodySourceType);
 
   try {
-    const result = await fullPipeline(url, source);
+    const { result, attempts } = await retryWithBackoff(
+      () => fullPipeline(url, source),
+      `process:${url.slice(0, 60)}`,
+      isPipelineValidationError,
+    );
     if ('youtube_unavailable' in result) {
       res.json({
         success: true,
@@ -696,16 +789,22 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
         knowledge_count: 0,
         source_url: url,
         notification: '🎬 YouTube временно недоступен на этом сервере. Скопируй транскрипт через youtubetotranscript.com и отправь текстом',
+        _retry: { attempts },
       });
     } else if ('duplicate' in result) {
-      res.json({ success: true, status: 'duplicate', knowledge_count: 0, source_url: url, notification: '♻️ Этот контент уже обрабатывался' });
+      res.json({ success: true, status: 'duplicate', knowledge_count: 0, source_url: url, notification: '♻️ Этот контент уже обрабатывался', _retry: { attempts } });
     } else {
-      res.json({ success: true, status: 'done', knowledge_count: result.analysis.knowledge_items.length, source_url: url, notification: result.notification, _diag: result.diag, ...result.analysis });
+      res.json({ success: true, status: 'done', knowledge_count: result.analysis.knowledge_items.length, source_url: url, notification: result.notification, _diag: result.diag, _retry: { attempts }, ...result.analysis });
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[/process] pipeline failed for ${url}:`, message);
-    res.status(500).json({ success: false, error: message });
+    console.error(`[/process] pipeline failed for ${url} after ${MAX_RETRIES + 1} attempts:`, message);
+    // Mark failed in DB after retries exhausted
+    if (!isPipelineValidationError(err)) {
+      await markUrlFailed(url, message, MAX_RETRIES + 1);
+      await writeIntakeLog({ url, stage: 'failed_exhausted', duration_ms: 0, error: message });
+    }
+    res.status(500).json({ success: false, error: message, attempts: MAX_RETRIES + 1 });
   }
 });
 
@@ -873,32 +972,26 @@ app.post('/batch', processLimiter, async (req: Request, res: Response) => {
 async function processBatchUrl(
   url: string,
   source: Source,
-): Promise<{ url: string; status: 'success' | 'skipped' | 'error'; reason?: string; knowledge_count?: number; error?: string }> {
-  const attempt = async () => fullPipeline(url, source);
-
-  let result;
+): Promise<{ url: string; status: 'success' | 'skipped' | 'error'; reason?: string; knowledge_count?: number; error?: string; attempts?: number }> {
   try {
-    result = await attempt();
+    const { result, attempts } = await retryWithBackoff(
+      () => fullPipeline(url, source),
+      `batch:${url.slice(0, 60)}`,
+      isPipelineValidationError,
+    );
+
+    if ('duplicate' in result) return { url, status: 'skipped', reason: 'duplicate', attempts };
+    if ('youtube_unavailable' in result) return { url, status: 'skipped', reason: 'youtube_unavailable', attempts };
+    return { url, status: 'success', knowledge_count: result.analysis.knowledge_items.length, attempts };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // Validation errors (bad URL format etc.) — no retry
-    if (msg.toLowerCase().includes('invalid') || msg.includes('400')) {
-      return { url, status: 'error', error: msg };
+    // Mark failed in DB after all retries exhausted (skip for validation errors)
+    if (!isPipelineValidationError(err)) {
+      await markUrlFailed(url, msg, MAX_RETRIES + 1);
+      await writeIntakeLog({ url, stage: 'failed_exhausted', duration_ms: 0, error: msg });
     }
-    // Pipeline/network failure — 1 retry after 3s (equivalent to 5xx)
-    console.warn(`[batch] ${url} failed, retrying in 3s: ${msg}`);
-    await new Promise(r => setTimeout(r, 3000));
-    try {
-      result = await attempt();
-    } catch (retryErr) {
-      const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-      return { url, status: 'error', error: retryMsg };
-    }
+    return { url, status: 'error', error: msg, attempts: MAX_RETRIES + 1 };
   }
-
-  if ('duplicate' in result) return { url, status: 'skipped', reason: 'duplicate' };
-  if ('youtube_unavailable' in result) return { url, status: 'skipped', reason: 'youtube_unavailable' };
-  return { url, status: 'success', knowledge_count: result.analysis.knowledge_items.length };
 }
 
 async function writeBatchSummary(
