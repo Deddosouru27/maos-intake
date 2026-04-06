@@ -3,6 +3,8 @@ import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel, EntityObject 
 
 // API Cost Protection: max 1 retry. See incident 29.03.
 // Gemini free tier — no retry needed; on fail caller falls back to Haiku pipeline.
+// SDK v0.24.1 uses v1beta API. Confirmed working model names for v1beta:
+// gemini-2.0-flash, gemini-1.5-flash-latest, gemini-1.5-flash-002
 const MODEL_ID = 'gemini-2.0-flash';
 
 const SYSTEM_PROMPT = `You are a knowledge extraction engine analyzing a YouTube video.
@@ -109,10 +111,16 @@ export async function analyzeYouTubeWithGemini(url: string): Promise<BrainAnalys
 
   console.log('[GEMINI] Analyzing YouTube URL:', url);
 
-  // Gemini 1.5+ understands YouTube URLs natively when mentioned in the text prompt.
-  // fileData is for GCS/Files API uploads — does NOT support YouTube URLs.
+  // Gemini 1.5+ processes YouTube URLs natively via fileData.
+  // Google's servers fetch the video — Vercel egress restrictions don't apply here.
   const result = await model.generateContent([
-    { text: `Analyze this YouTube video: ${url}\n\n${USER_PROMPT}` },
+    {
+      fileData: {
+        mimeType: 'video/mp4',
+        fileUri: url,
+      },
+    },
+    { text: USER_PROMPT },
   ]);
 
   const raw = result.response.text();

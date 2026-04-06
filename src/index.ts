@@ -6,7 +6,7 @@ import { createClient } from '@supabase/supabase-js';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent, analyzeWithChunking } from './services/analyze';
-import { insertIngestedPending, updateIngestedDone, saveExtractedKnowledge, saveToPitstop, upsertEntityGraph } from './services/pitstop';
+import { insertIngestedPending, updateIngestedDone, quarantineIngestedItem, saveExtractedKnowledge, saveToPitstop, upsertEntityGraph } from './services/pitstop';
 import { rerankItems } from './services/rerank';
 import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
@@ -498,6 +498,40 @@ async function runPipeline(
     await updateIngestedDone(ingestedId, analysis, routingResult, itemsToSave.length, isGuide);
   }
 
+  // Quarantine check — anomalous score or empty entities → flag for review
+  if (ingestedId) {
+    const score = analysis.overall_immediate;
+    const allEntities = analysis.knowledge_items.flatMap(i => [
+      ...(i.tags ?? []),
+      ...(i.entity_objects ?? []).map(e => e.name),
+    ]);
+    const entitiesEmpty = (analysis.entities ?? []).length === 0 && allEntities.length === 0;
+
+    let quarantineReason: string | null = null;
+    if (score < 0.1) {
+      quarantineReason = 'low_score';
+    } else if (score > 0.95) {
+      quarantineReason = 'high_score';
+    } else if (entitiesEmpty) {
+      quarantineReason = 'empty_entities';
+    }
+
+    if (quarantineReason) {
+      console.warn(`[QUARANTINE] score=${score.toFixed(3)} entities=${allEntities.length} → ${quarantineReason}`);
+      await quarantineIngestedItem(ingestedId, quarantineReason);
+      // Return early — don't save anomalous knowledge to extracted_knowledge or ideas
+      return {
+        notification: `⚠️ Карантин: ${quarantineReason}`,
+        haikuItems: analysis.knowledge_items.length,
+        itemsToSave: 0,
+        savedItems: 0,
+        dedupSkipped: 0,
+        smartCrudUpdates: 0,
+        haikuRaw: null,
+      };
+    }
+  }
+
   // Save extracted_knowledge first to get IDs, then link ideas
   console.log('[PIPELINE] saving extracted_knowledge...');
   let knowledgeSaved: { id: string; content: string }[] = [];
@@ -548,7 +582,7 @@ async function runPipeline(
 }
 
 interface PipelineDiag { haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number; smartCrudUpdates: number; haikuRaw: string | null }
-async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis; diag: PipelineDiag } | { duplicate: true } | { youtube_unavailable: true }> {
+async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis; diag: PipelineDiag } | { duplicate: true } | { youtube_unavailable: true; _gemini_error?: string }> {
   // 45s hard timeout — Vercel maxDuration is 60s, leaves buffer for network
   const timeoutId = setTimeout(() => {
     throw new Error('[INTAKE] Pipeline timeout (45s)');
@@ -670,11 +704,27 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
         analysis = await analyzeYouTubeWithGemini(url);
         console.log(`[PIPELINE] 5a. Gemini ok — items: ${analysis.knowledge_items.length}`);
       } catch (geminiErr) {
-        console.warn('[PIPELINE] Gemini failed, falling back to Haiku:', geminiErr instanceof Error ? geminiErr.message : String(geminiErr));
+        const geminiErrMsg = geminiErr instanceof Error ? geminiErr.message : String(geminiErr);
+        console.warn('[PIPELINE] Gemini failed:', geminiErrMsg);
+        const failedAnalysis: BrainAnalysis = { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'failed', language: 'other' };
+        // Secondary fallback: try transcript
         if (rawText.length < 30) {
-          // No transcript available and Gemini failed — truly unavailable
-          return { youtube_unavailable: true };
+          console.log('[PIPELINE] Gemini failed + no rawText — trying transcript fetch');
+          try {
+            const transcriptFetched = await fetchRawContent(url, source);
+            if (transcriptFetched.youtube_unavailable || transcriptFetched.rawText.length < 30) {
+              if (ingestedId) await updateIngestedDone(ingestedId, failedAnalysis, 'youtube_unavailable', 0, false, 'failed');
+              return { youtube_unavailable: true, _gemini_error: geminiErrMsg.slice(0, 300) };
+            }
+            rawText = transcriptFetched.rawText;
+            title = transcriptFetched.title;
+          } catch (transcriptErr) {
+            console.warn('[PIPELINE] Transcript fallback also failed:', transcriptErr instanceof Error ? transcriptErr.message : String(transcriptErr));
+            if (ingestedId) await updateIngestedDone(ingestedId, failedAnalysis, 'failed', 0, false, geminiErrMsg.slice(0, 200));
+            return { youtube_unavailable: true, _gemini_error: geminiErrMsg.slice(0, 300) };
+          }
         }
+        console.log('[PIPELINE] Falling back to Haiku with transcript:', rawText.length, 'chars');
         analysis = await analyzeWithChunking(rawText, url);
       }
     } else {
@@ -789,6 +839,7 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
         knowledge_count: 0,
         source_url: url,
         notification: '🎬 YouTube временно недоступен на этом сервере. Скопируй транскрипт через youtubetotranscript.com и отправь текстом',
+        _gemini_error: result._gemini_error,
         _retry: { attempts },
       });
     } else if ('duplicate' in result) {

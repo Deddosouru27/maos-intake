@@ -105,6 +105,35 @@ export async function insertIngestedPending(
   return id;
 }
 
+// QUARANTINE — set quarantined=true + quarantine_reason on ingested_content
+export async function quarantineIngestedItem(
+  id: string,
+  reason: 'low_score' | 'high_score' | 'empty_entities' | string,
+): Promise<void> {
+  let supabase;
+  try {
+    supabase = getClient();
+  } catch (err) {
+    console.error('[pitstop] quarantine client init failed:', err);
+    return;
+  }
+
+  const { error } = await supabase
+    .from('ingested_content')
+    .update({
+      quarantined: true,
+      quarantine_reason: reason,
+      processing_status: 'quarantined',
+    })
+    .eq('id', id);
+
+  if (error) {
+    console.error('[INTAKE] IC QUARANTINE ERROR:', JSON.stringify(error));
+  } else {
+    console.warn(`[QUARANTINE] ingested_content ${id} quarantined: ${reason}`);
+  }
+}
+
 // UPDATE after analysis completes
 export async function updateIngestedDone(
   id: string,
