@@ -6,7 +6,7 @@ import { createClient } from '@supabase/supabase-js';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent, analyzeWithChunking } from './services/analyze';
-import { insertIngestedPending, updateIngestedDone, saveExtractedKnowledge, saveToPitstop, upsertEntityGraph } from './services/pitstop';
+import { insertIngestedPending, updateIngestedDone, quarantineIngestedItem, saveExtractedKnowledge, saveToPitstop, upsertEntityGraph } from './services/pitstop';
 import { rerankItems } from './services/rerank';
 import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
@@ -496,6 +496,40 @@ async function runPipeline(
   // Update ingested_content with analysis results (use post-filter count)
   if (ingestedId) {
     await updateIngestedDone(ingestedId, analysis, routingResult, itemsToSave.length, isGuide);
+  }
+
+  // Quarantine check — anomalous score or empty entities → flag for review
+  if (ingestedId) {
+    const score = analysis.overall_immediate;
+    const allEntities = analysis.knowledge_items.flatMap(i => [
+      ...(i.tags ?? []),
+      ...(i.entity_objects ?? []).map(e => e.name),
+    ]);
+    const entitiesEmpty = (analysis.entities ?? []).length === 0 && allEntities.length === 0;
+
+    let quarantineReason: string | null = null;
+    if (score < 0.1) {
+      quarantineReason = 'low_score';
+    } else if (score > 0.95) {
+      quarantineReason = 'high_score';
+    } else if (entitiesEmpty) {
+      quarantineReason = 'empty_entities';
+    }
+
+    if (quarantineReason) {
+      console.warn(`[QUARANTINE] score=${score.toFixed(3)} entities=${allEntities.length} → ${quarantineReason}`);
+      await quarantineIngestedItem(ingestedId, quarantineReason);
+      // Return early — don't save anomalous knowledge to extracted_knowledge or ideas
+      return {
+        notification: `⚠️ Карантин: ${quarantineReason}`,
+        haikuItems: analysis.knowledge_items.length,
+        itemsToSave: 0,
+        savedItems: 0,
+        dedupSkipped: 0,
+        smartCrudUpdates: 0,
+        haikuRaw: null,
+      };
+    }
   }
 
   // Save extracted_knowledge first to get IDs, then link ideas
