@@ -6,7 +6,7 @@ import { createClient } from '@supabase/supabase-js';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent, analyzeWithChunking } from './services/analyze';
-import { checkSourceUrlDedup, insertIngestedPending, updateIngestedDone, quarantineIngestedItem, saveExtractedKnowledge, saveToPitstop, upsertEntityGraph } from './services/pitstop';
+import { checkSourceUrlDedup, checkContentHashDedup, insertIngestedPending, updateIngestedDone, quarantineIngestedItem, saveExtractedKnowledge, saveToPitstop, upsertEntityGraph } from './services/pitstop';
 import { rerankItems } from './services/rerank';
 import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
@@ -250,7 +250,8 @@ function detectSource(url: string, provided?: string): Source {
 }
 
 function computeHash(text: string): string {
-  return createHash('sha256').update(text.slice(0, 1000)).digest('hex');
+  const normalized = text.trim().replace(/\s+/g, ' ');
+  return createHash('sha256').update(normalized).digest('hex');
 }
 
 function routeItems(items: KnowledgeItem[]): RoutedKnowledgeItem[] {
@@ -641,25 +642,18 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
     }
     console.log('[PIPELINE] 4. Context ok — projects:', context.projects.length, 'domains:', context.domains.length, 'recentHashes:', context.recentHashes.length);
 
+    // In-memory cache check (fast path)
     if (context.recentHashes.includes(contentHash)) {
       console.log('[PIPELINE] Content hash dedup HIT (cache):', contentHash.slice(0, 8));
-      await writeIntakeLog({ url, stage: 'dedup_skip', duration_ms: Date.now() - startTime });
+      await writeIntakeLog({ url, stage: 'content_hash_dedup', duration_ms: Date.now() - startTime });
       return { duplicate: true };
     }
-    // DB fallback — cache only holds last 100 done records
-    if (pitstopUrl && pitstopKey) {
-      const sb = createClient(pitstopUrl, pitstopKey);
-      const { data: hashRow } = await sb
-        .from('ingested_content')
-        .select('id')
-        .eq('content_hash', contentHash)
-        .eq('processing_status', 'done')
-        .limit(1);
-      if (hashRow && hashRow.length > 0) {
-        console.log('[PIPELINE] Content hash dedup HIT (DB):', contentHash.slice(0, 8));
-        await writeIntakeLog({ url, stage: 'dedup_skip', duration_ms: Date.now() - startTime });
-        return { duplicate: true };
-      }
+    // DB check — catches same content from different URLs (done, processing, quarantined)
+    const hashDedup = await checkContentHashDedup(contentHash);
+    if (hashDedup.exists) {
+      console.log(`[PIPELINE] Content hash dedup HIT (DB) — same content as ${hashDedup.sourceUrl}`);
+      await writeIntakeLog({ url, stage: 'content_hash_dedup', duration_ms: Date.now() - startTime });
+      return { duplicate: true };
     }
 
     // YouTube dedup by video ID (hash may differ due to caption format changes)
@@ -889,20 +883,10 @@ async function rawTextPipeline(
     console.log('[INTAKE] Content hash dedup HIT (cache):', contentHash.slice(0, 8));
     return { duplicate: true };
   }
-  // DB fallback — cache only holds last 100 done records
-  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
-  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
-  if (pitstopUrl && pitstopKey) {
-    const { data: hashRow } = await createClient(pitstopUrl, pitstopKey)
-      .from('ingested_content')
-      .select('id')
-      .eq('content_hash', contentHash)
-      .eq('processing_status', 'done')
-      .limit(1);
-    if (hashRow && hashRow.length > 0) {
-      console.log('[INTAKE] Content hash dedup HIT (DB):', contentHash.slice(0, 8));
-      return { duplicate: true };
-    }
+  const hashDedup = await checkContentHashDedup(contentHash);
+  if (hashDedup.exists) {
+    console.log(`[INTAKE] Content hash dedup HIT (DB) — same content as ${hashDedup.sourceUrl}`);
+    return { duplicate: true };
   }
 
   const ingestedId = await insertIngestedPending(rawText, label, sourceType, title, contentHash);
@@ -1024,7 +1008,11 @@ app.post('/batch', processLimiter, async (req: Request, res: Response) => {
       const contentHash = computeHash(rawText);
 
       const context = await getFullContext();
-      if (context.recentHashes.includes(contentHash)) {
+      const cacheHit = context.recentHashes.includes(contentHash);
+      const dbHit = cacheHit ? null : await checkContentHashDedup(contentHash);
+      if (cacheHit || (dbHit && dbHit.exists)) {
+        const reason = cacheHit ? 'cache' : `DB, same as ${dbHit?.sourceUrl}`;
+        console.log(`[/batch] Content hash dedup HIT (${reason}):`, contentHash.slice(0, 8));
         results.push({
           summary: '',
           knowledge_items: [],
@@ -1035,7 +1023,7 @@ app.post('/batch', processLimiter, async (req: Request, res: Response) => {
           category: 'other',
           language: 'other',
           duplicate: true,
-          notification: '♻️ Этот контент уже обрабатывался',
+          notification: `♻️ Контент уже обрабатывался (${reason})`,
         });
         continue;
       }

@@ -73,6 +73,47 @@ export async function checkSourceUrlDedup(
   return { exists: false };
 }
 
+// Check if content_hash already exists in ingested_content (catches same content from different URLs)
+export async function checkContentHashDedup(
+  contentHash: string,
+): Promise<{ exists: boolean; status?: string; id?: string; sourceUrl?: string }> {
+  const url = process.env.PITSTOP_SUPABASE_URL;
+  const key = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!url || !key) {
+    console.warn('[dedup] PITSTOP env not set — skipping content_hash dedup');
+    return { exists: false };
+  }
+
+  let supabase;
+  try {
+    supabase = createClient(url, key);
+  } catch (err) {
+    console.error('[dedup] client init failed:', err);
+    return { exists: false };
+  }
+
+  const { data, error } = await supabase
+    .from('ingested_content')
+    .select('id, processing_status, source_url')
+    .eq('content_hash', contentHash)
+    .in('processing_status', ['done', 'processing', 'quarantined'])
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (error) {
+    console.error('[dedup] content_hash check error:', error.message);
+    return { exists: false };
+  }
+
+  if (data && data.length > 0) {
+    const row = data[0] as { id: string; processing_status: string; source_url: string };
+    console.log(`[dedup] content_hash HIT — status: ${row.processing_status}, id: ${row.id}, original_url: ${row.source_url}`);
+    return { exists: true, status: row.processing_status, id: row.id, sourceUrl: row.source_url };
+  }
+
+  return { exists: false };
+}
+
 // INSERT before analysis — ensures dedup works even if Haiku fails
 export async function insertIngestedPending(
   rawText: string,
