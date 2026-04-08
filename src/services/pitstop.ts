@@ -633,3 +633,65 @@ export async function saveToPitstop(
     console.log(`[pitstop] saved ${hotItems.length} hot + ${strategicItems.length} strategic ideas from ${sourceType}`);
   }
 }
+
+// Source quality scoring — upsert domain-level stats after each processing
+export async function upsertSourceQuality(
+  sourceUrl: string,
+  overallImmediate: number,
+  overallStrategic: number,
+  entityCount: number,
+  success: boolean,
+): Promise<void> {
+  let domain: string;
+  try {
+    domain = new URL(sourceUrl).hostname.replace(/^www\./, '');
+  } catch {
+    return; // not a valid URL (manual paste, etc.)
+  }
+
+  let supabase;
+  try {
+    supabase = getClient();
+  } catch (err) {
+    console.error('[source_quality] client init failed:', err);
+    return;
+  }
+
+  // Fetch existing stats
+  const { data: existing } = await supabase
+    .from('source_quality')
+    .select('avg_score, avg_strategic, success_rate, avg_entity_count, total_processed')
+    .eq('domain', domain)
+    .limit(1)
+    .single();
+
+  const prev = existing as { avg_score: number; avg_strategic: number; success_rate: number; avg_entity_count: number; total_processed: number } | null;
+  const n = (prev?.total_processed ?? 0);
+  const avgScore = (overallImmediate + overallStrategic) / 2;
+
+  // Incremental average: new_avg = (old_avg * n + new_value) / (n + 1)
+  const newAvgScore = n > 0 ? (prev!.avg_score * n + avgScore) / (n + 1) : avgScore;
+  const newAvgStrategic = n > 0 ? (prev!.avg_strategic * n + overallStrategic) / (n + 1) : overallStrategic;
+  const newSuccessRate = n > 0 ? (prev!.success_rate * n + (success ? 1 : 0)) / (n + 1) : (success ? 1 : 0);
+  const newAvgEntityCount = n > 0 ? (prev!.avg_entity_count * n + entityCount) / (n + 1) : entityCount;
+
+  const row = {
+    domain,
+    avg_score: +newAvgScore.toFixed(4),
+    avg_strategic: +newAvgStrategic.toFixed(4),
+    success_rate: +newSuccessRate.toFixed(4),
+    avg_entity_count: +newAvgEntityCount.toFixed(2),
+    total_processed: n + 1,
+    last_processed_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase
+    .from('source_quality')
+    .upsert(row, { onConflict: 'domain' });
+
+  if (error) {
+    console.error('[source_quality] upsert failed:', error.message);
+  } else {
+    console.log(`[source_quality] ${domain}: score=${row.avg_score} success=${row.success_rate} entities=${row.avg_entity_count} n=${row.total_processed}`);
+  }
+}

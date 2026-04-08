@@ -6,7 +6,7 @@ import { createClient } from '@supabase/supabase-js';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent, analyzeWithChunking } from './services/analyze';
-import { checkSourceUrlDedup, checkContentHashDedup, insertIngestedPending, updateIngestedDone, quarantineIngestedItem, saveExtractedKnowledge, generateAutoIdeas, saveToPitstop, upsertEntityGraph } from './services/pitstop';
+import { checkSourceUrlDedup, checkContentHashDedup, insertIngestedPending, updateIngestedDone, quarantineIngestedItem, saveExtractedKnowledge, generateAutoIdeas, saveToPitstop, upsertEntityGraph, upsertSourceQuality } from './services/pitstop';
 import { rerankItems } from './services/rerank';
 import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
@@ -578,6 +578,16 @@ async function runPipeline(
   // Write-after-action: context_snapshot
   writeContextSnapshot(sourceUrl, sourceType, knowledgeSaved.length, hotItems.length + strategicIdeas.length, analysis, pipelineStart).catch((e) => {
     console.warn('[PIPELINE] context_snapshot failed (non-fatal):', e instanceof Error ? e.message : String(e));
+  });
+
+  // Source quality scoring — track domain-level stats
+  const allEntitiesForQuality = analysis.knowledge_items.flatMap(i => [
+    ...(i.tags ?? []),
+    ...(i.entity_objects ?? []).map(e => e.name),
+  ]);
+  const uniqueEntityCount = new Set(allEntitiesForQuality).size;
+  upsertSourceQuality(sourceUrl, analysis.overall_immediate, analysis.overall_strategic, uniqueEntityCount, true).catch((e) => {
+    console.warn('[PIPELINE] source_quality failed (non-fatal):', e instanceof Error ? e.message : String(e));
   });
 
   return {
