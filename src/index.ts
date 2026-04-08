@@ -2850,6 +2850,149 @@ app.post('/process-rss', processLimiter, async (_req: Request, res: Response) =>
   res.json({ processed, failed, remaining: count ?? 0 });
 });
 
+// ── /process-ideas helpers ────────────────────────────────────────────────────
+
+interface IdeaEvaluation {
+  action: 'accepted' | 'rejected' | 'deferred';
+  reason: string;
+  urgency: number;
+  impact: number;
+  effort: 'low' | 'medium' | 'high';
+  category: 'infrastructure' | 'intake' | 'monetization' | 'optimization' | 'research';
+  suggested_assignee: string;
+  suggested_work_type: string;
+  depends_on: string | null;
+  duplicate_of: string | null;
+}
+
+function extractJSON(text: string): string {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start !== -1 && end > start) return text.slice(start, end + 1);
+  return text;
+}
+
+async function evaluateIdea(idea: { id: string; content: string; source_type?: string; source_url?: string }): Promise<IdeaEvaluation> {
+  const { callGeminiForText } = await import('./services/gemini');
+  const prompt = `You are MAOS idea evaluator. Be HARSH and honest.
+
+IDEA: "${idea.content}"
+SOURCE: ${idea.source_type ?? 'unknown'} (${idea.source_url ?? 'no URL'})
+
+CONTEXT: MAOS is a personal multi-agent system. Stack: TypeScript, Node.js,
+Supabase, Vercel/Railway, Telegram bot, Claude Code, Gemini CLI.
+Current priorities: autorun stability, YouTube pipeline, RSS processing,
+monetization (no revenue yet).
+
+EVALUATE:
+1. Is this a DUPLICATE of common knowledge? (e.g. "use AI for automation" = obvious)
+2. Is this ACTIONABLE? (concrete steps, not vague advice)
+3. Is this APPLICABLE to our stack? (Python-only ideas = low value)
+4. What PROBLEM does it solve?
+5. What DEPENDS on this? (needs something else first?)
+
+Return ONLY JSON:
+{
+  "action": "accepted|rejected|deferred",
+  "reason": "One sentence why",
+  "urgency": 0-10,
+  "impact": 0-10,
+  "effort": "low|medium|high",
+  "category": "infrastructure|intake|monetization|optimization|research",
+  "suggested_assignee": "nout|intaker|pekar|artur",
+  "suggested_work_type": "blocker|critical_fix|enabling|product|nice_to_have",
+  "depends_on": "what needs to be done first or null",
+  "duplicate_of": "existing task/idea title if duplicate, or null"
+}
+
+REJECTION reasons:
+- "too vague" — no concrete action
+- "duplicate" — we already do this or have this task
+- "wrong stack" — Python/Java specific, we use TypeScript
+- "low impact" — nice to know but won't move the needle
+- "not now" — good but requires things we don't have yet`;
+
+  const raw = await callGeminiForText(prompt);
+  const parsed = JSON.parse(extractJSON(raw)) as IdeaEvaluation;
+  return parsed;
+}
+
+async function createTaskFromIdea(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sb: any,
+  idea: { id: string; content: string },
+  evaluation: IdeaEvaluation,
+): Promise<void> {
+  const { error } = await sb.from('tasks').insert({
+    title: idea.content.slice(0, 200),
+    description: `Auto-created from idea. ${evaluation.reason}. Depends on: ${evaluation.depends_on ?? 'nothing'}`,
+    status: evaluation.urgency >= 9 ? 'todo' : 'backlog',
+    work_type: evaluation.suggested_work_type,
+    assignee: evaluation.suggested_assignee,
+    source: 'idea_pipeline',
+    system: evaluation.category === 'intake' ? 'Intake' : evaluation.category === 'infrastructure' ? 'Runner' : 'Cross-system',
+  });
+  if (error) {
+    console.warn('[process-ideas] tasks insert failed:', error.message);
+    return;
+  }
+  await sb.from('ideas').update({ converted_to_task: true }).eq('id', idea.id);
+}
+
+/** POST /process-ideas — AI evaluates unreviewed ideas via Gemini. Body: { limit? } */
+app.post('/process-ideas', async (req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+  if (!process.env.GEMINI_API_KEY) { res.status(500).json({ error: 'GEMINI_API_KEY not configured' }); return; }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sb: any = createClient(pitstopUrl, pitstopKey);
+  const limit = Math.min(Number(req.body?.limit) || 10, 20);
+
+  const { data: ideas, error } = await sb
+    .from('ideas')
+    .select('id,content,source_type,source_url')
+    .or('status.is.null,status.eq.new')
+    .order('created_at', { ascending: true })
+    .limit(limit);
+
+  if (error) { res.status(500).json({ error: String(error) }); return; }
+  if (!ideas || ideas.length === 0) { res.json({ processed: 0, results: [] }); return; }
+
+  const results: { id: string; action: string; reason: string }[] = [];
+
+  for (const idea of ideas as { id: string; content: string; source_type?: string; source_url?: string }[]) {
+    try {
+      const evaluation = await evaluateIdea(idea);
+
+      await sb.from('ideas').update({
+        status: evaluation.action,
+        ai_analysis: evaluation,
+        reviewed_at: new Date().toISOString(),
+        reviewed_by: 'gemini-auto',
+        relevance: evaluation.impact >= 7 ? 'hot' : evaluation.impact >= 4 ? 'strategic' : 'low',
+        rejection_reason: evaluation.action === 'rejected' ? evaluation.reason : null,
+      }).eq('id', idea.id);
+
+      if (evaluation.action === 'accepted' && evaluation.urgency >= 7) {
+        await createTaskFromIdea(sb, idea, evaluation).catch((e) =>
+          console.warn('[process-ideas] createTask failed:', e instanceof Error ? e.message : String(e)),
+        );
+      }
+
+      results.push({ id: idea.id, action: evaluation.action, reason: evaluation.reason });
+      console.log(`[process-ideas] ${idea.id}: ${evaluation.action} — ${evaluation.reason}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[process-ideas] idea ${idea.id} failed:`, msg);
+      results.push({ id: idea.id, action: 'error', reason: msg.slice(0, 100) });
+    }
+  }
+
+  res.json({ processed: results.length, results });
+});
+
 /** POST /triage — per-idea Haiku triage with calibration few-shots. Body: { limit? }. */
 app.post('/triage', async (req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;

@@ -53,7 +53,16 @@ QUALITY RULES:
 - Tags: 1-3 per item, specific — "Supabase Edge Functions" not "technology"
 - Entities: proper nouns only — tools, projects, people. NEVER: "AI", "фреймворк", "мониторинг"
 - Ideas must start with verb: Добавить/Настроить/Мигрировать/Внедрить
-- SCORING: 0.8+ = actionable this week with Node.js/TS/Supabase/Claude/Vercel stack. 0.5–0.7 = strategic. <0.3 = generic/off-topic
+- SCORING RULES — be HARSH, not generous:
+  - 0.9-1.0: ONLY if directly applicable to our exact stack (Supabase, TypeScript, Telegram bots, Claude Code) AND provides step-by-step implementation
+  - 0.7-0.9: Relevant to AI/automation but needs adaptation to our stack
+  - 0.5-0.7: Interesting concept but not directly applicable
+  - 0.3-0.5: Tangentially related, nice-to-know
+  - 0.0-0.3: Not relevant to AI agents/automation/SaaS
+  Score EACH knowledge_item INDIVIDUALLY. A video about LangGraph may have:
+  'LangGraph checkpoints for state persistence' = 0.7 (concept applicable)
+  'Python-specific LangGraph setup' = 0.3 (we use TypeScript)
+  'Supervisor pattern for multi-agent' = 0.9 (directly applicable to MAOS)
 - All text content in Russian.`;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -235,4 +244,36 @@ export async function analyzeYouTubeWithGemini(url: string): Promise<BrainAnalys
   const analysis = buildBrainAnalysis(parsed);
   console.log(`[GEMINI] Extracted ${analysis.knowledge_items.length} items, score: ${analysis.overall_immediate.toFixed(2)}, relevant: ${parsed.relevant}`);
   return analysis;
+}
+
+/** Text-only Gemini call — reuses same REST infra, model gemini-2.5-flash (free tier). */
+export async function callGeminiForText(prompt: string): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
+
+  const TEXT_MODEL = 'gemini-2.5-flash';
+  const endpoint = `${API_BASE}/${TEXT_MODEL}:generateContent?key=${apiKey}`;
+
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },
+      }),
+    });
+  } catch (e) {
+    throw new Error(`Gemini text network error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  if (response.status === 429) throw new Error('GEMINI_QUOTA_EXCEEDED: rate limit hit');
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new Error(`Gemini text API ${response.status}: ${errText.slice(0, 200)}`);
+  }
+
+  const json = await response.json() as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+  return json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 }
