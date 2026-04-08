@@ -2,7 +2,7 @@ import { BrainAnalysis, KnowledgeItem, KnowledgeType, EntityObject, EffortLevel 
 
 // gemini-2.5-flash via REST v1beta — free tier: 250 videos/day, 10 RPM.
 // SDK dropped: direct REST gives full control over model name and error codes.
-const MODEL_ID = 'gemini-2.5-flash';
+const MODEL_ID = 'gemini-3-flash-preview'; // YouTube fileData requires gemini-3+
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 const SYSTEM_PROMPT = `You are MAOS knowledge extraction engine.
