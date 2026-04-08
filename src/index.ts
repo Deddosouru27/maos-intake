@@ -1653,7 +1653,7 @@ app.delete('/cleanup-stale', async (_req: Request, res: Response) => {
     .from('ingested_content')
     .update({ processing_status: 'failed' })
     .eq('processing_status', 'processing')
-    .lt('updated_at', oneHourAgo)
+    .lt('created_at', oneHourAgo)
     .select('id');
 
   if (error) { res.status(500).json({ error: (error as { message?: string }).message ?? JSON.stringify(error) }); return; }
