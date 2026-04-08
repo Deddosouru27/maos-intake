@@ -271,9 +271,31 @@ export async function analyzeWithChunking(text: string, source: string): Promise
 }
 
 export async function analyzeContent(text: string, source: string, isChunk = false): Promise<BrainAnalysis> {
+  // Token estimation upstream guard — before expensive truncation logic
+  const estimatedTokens = Math.ceil(text.length / 4);
+  console.log(`[extraction] estimated tokens: ${estimatedTokens}`);
+  if (estimatedTokens > 10000) text = text.slice(0, 40000);
+
   const trimmedText = text.length > MAX_CHARS_FOR_HAIKU
     ? text.substring(0, MAX_CHARS_FOR_HAIKU) + '\n[...текст обрезан...]'
     : text;
+
+  // Language pre-filter — skip content with no recognizable script
+  const cyrillicRatio = (trimmedText.match(/[а-яА-ЯёЁ]/g) ?? []).length / trimmedText.length;
+  const latinRatio = (trimmedText.match(/[a-zA-Z]/g) ?? []).length / trimmedText.length;
+  if (cyrillicRatio < 0.05 && latinRatio < 0.05) {
+    console.log(`[ANALYZE] skipping unknown_language content (cyrillic=${cyrillicRatio.toFixed(3)} latin=${latinRatio.toFixed(3)})`);
+    return {
+      summary: '',
+      knowledge_items: [],
+      overall_immediate: 0,
+      overall_strategic: 0,
+      priority_signal: false,
+      priority_reason: 'unknown_language',
+      category: 'skipped',
+      language: 'other',
+    };
+  }
 
   const context = await getFullContext();
   const trimmedContext = buildContextString(context);

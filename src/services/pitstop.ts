@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
+import { createHash } from 'crypto';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, EntityObject, EntityRelationship, EntityRelationshipType } from '../types';
 
 const openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -282,6 +283,20 @@ export async function saveExtractedKnowledge(
   type SimilarRow = { id: string; content: string; similarity: number };
 
   for (const item of items) {
+    // Fast content-hash dedup — skip before expensive embedding call
+    const contentHash = createHash('sha256').update(item.content).digest('hex');
+    const { data: hashExisting } = await supabase
+      .from('extracted_knowledge')
+      .select('id')
+      .eq('content_hash', contentHash)
+      .limit(1);
+    if (hashExisting && hashExisting.length > 0) {
+      console.log(`[SMART_CRUD] content_hash HIT — skipping duplicate`);
+      dedupSkipped++;
+      saved.push({ id: (hashExisting[0] as { id: string }).id, content: item.content });
+      continue;
+    }
+
     const embedding = hasEmbedding ? await getEmbedding(item.content) : null;
 
     // Default action when no embedding available
@@ -323,6 +338,7 @@ export async function saveExtractedKnowledge(
     const row = {
       ingested_content_id: ingestedContentId,
       content: item.content,
+      content_hash: contentHash,
       knowledge_type: item.knowledge_type,
       project_id: null,
       domain_ids: null,
@@ -708,10 +724,11 @@ export async function upsertSourceQuality(
   const avgScore = (overallImmediate + overallStrategic) / 2;
 
   // Incremental average: new_avg = (old_avg * n + new_value) / (n + 1)
-  const newAvgScore = n > 0 ? (prev!.avg_score * n + avgScore) / (n + 1) : avgScore;
-  const newAvgStrategic = n > 0 ? (prev!.avg_strategic * n + overallStrategic) / (n + 1) : overallStrategic;
-  const newSuccessRate = n > 0 ? (prev!.success_rate * n + (success ? 1 : 0)) / (n + 1) : (success ? 1 : 0);
-  const newAvgEntityCount = n > 0 ? (prev!.avg_entity_count * n + entityCount) / (n + 1) : entityCount;
+  const total = n + 1;
+  const newAvgScore = n > 0 ? (prev!.avg_score * n + avgScore) / total : avgScore;
+  const newAvgStrategic = n > 0 ? (prev!.avg_strategic * n + overallStrategic) / total : overallStrategic;
+  const newSuccessRate = n > 0 ? (prev!.success_rate * n + (success ? 1 : 0)) / total : (success ? 1 : 0);
+  const newAvgEntityCount = n > 0 ? (prev!.avg_entity_count * (total - 1) + entityCount) / total : entityCount;
 
   const row = {
     domain,
@@ -719,7 +736,7 @@ export async function upsertSourceQuality(
     avg_strategic: +newAvgStrategic.toFixed(4),
     success_rate: +newSuccessRate.toFixed(4),
     avg_entity_count: +newAvgEntityCount.toFixed(2),
-    total_processed: n + 1,
+    total_processed: total,
     last_processed_at: new Date().toISOString(),
   };
 
