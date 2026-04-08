@@ -2579,6 +2579,141 @@ app.get('/heartbeat', async (_req: Request, res: Response) => {
   res.json(result);
 });
 
+/** POST /generate-digest — weekly knowledge digest grouped by top tags. Zero LLM cost. */
+app.post('/generate-digest', async (req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const days = Math.min(Number(req.body?.days ?? 7), 30);
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  const { data: rows, error: fetchErr } = await sb
+    .from('extracted_knowledge')
+    .select('content, entities, immediate_relevance, knowledge_type, source_url, created_at')
+    .gte('created_at', since.toISOString())
+    .order('immediate_relevance', { ascending: false })
+    .limit(500);
+
+  if (fetchErr) {
+    res.status(500).json({ error: fetchErr.message });
+    return;
+  }
+  if (!rows || rows.length === 0) {
+    res.json({ digest: 'No knowledge items in the last ' + days + ' days.', total: 0 });
+    return;
+  }
+
+  // Count tag frequency across all items
+  const tagFreq = new Map<string, number>();
+  for (const row of rows) {
+    const tags = (row.entities as string[] | null) ?? [];
+    for (const tag of tags) {
+      const normalized = tag.trim().toLowerCase();
+      if (normalized.length < 2) continue;
+      tagFreq.set(normalized, (tagFreq.get(normalized) ?? 0) + 1);
+    }
+  }
+
+  // Top tags sorted by frequency
+  const sortedTags = [...tagFreq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10);
+
+  // Group items by their highest-frequency tag
+  type DigestItem = { content: string; score: number; source_url: string | null };
+  const groups = new Map<string, DigestItem[]>();
+  const assigned = new Set<number>();
+
+  for (const [tag] of sortedTags) {
+    const items: DigestItem[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      if (assigned.has(i)) continue;
+      const row = rows[i];
+      const tags = ((row.entities as string[] | null) ?? []).map((t: string) => t.trim().toLowerCase());
+      if (tags.includes(tag)) {
+        items.push({
+          content: (row.content as string).slice(0, 120),
+          score: row.immediate_relevance as number,
+          source_url: row.source_url as string | null,
+        });
+        assigned.add(i);
+      }
+    }
+    if (items.length > 0) {
+      const displayTag = tag.charAt(0).toUpperCase() + tag.slice(1);
+      groups.set(displayTag, items);
+    }
+  }
+
+  // Collect unassigned items into "Other"
+  const otherItems: DigestItem[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (!assigned.has(i)) {
+      otherItems.push({
+        content: (rows[i].content as string).slice(0, 120),
+        score: rows[i].immediate_relevance as number,
+        source_url: rows[i].source_url as string | null,
+      });
+    }
+  }
+  if (otherItems.length > 0) {
+    groups.set('Other', otherItems);
+  }
+
+  // Format date range
+  const endDate = new Date();
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const dateRange = `${months[since.getMonth()]} ${since.getDate()}\u2013${months[endDate.getMonth()]} ${endDate.getDate()}`;
+
+  const emojis = ['\ud83d\udd27', '\ud83d\udca1', '\ud83e\udde0', '\ud83d\ude80', '\ud83d\udcca', '\ud83c\udfaf', '\u2699\ufe0f', '\ud83d\udce6', '\ud83d\udd0d', '\ud83c\udf10', '\ud83d\udcdd'];
+
+  // Build digest text
+  const lines: string[] = [`\ud83d\udcda MAOS Knowledge Digest (${dateRange})`, ''];
+  let groupIdx = 0;
+  for (const [tag, items] of groups) {
+    const emoji = emojis[groupIdx % emojis.length];
+    lines.push(`${emoji} ${tag} (${items.length} articles):`);
+    const top = items.sort((a, b) => b.score - a.score).slice(0, 3);
+    for (const item of top) {
+      lines.push(`  - ${item.content}`);
+    }
+    lines.push('');
+    groupIdx++;
+  }
+
+  const digest = lines.join('\n').trim();
+
+  // Save to context_snapshots
+  const snapshotContent = {
+    type: 'weekly_digest',
+    days,
+    date_range: dateRange,
+    total_items: rows.length,
+    groups: [...groups.entries()].map(([tag, items]) => ({ tag, count: items.length, top: items.slice(0, 3).map(i => i.content) })),
+    generated_at: new Date().toISOString(),
+  };
+
+  const { error: insertErr } = await sb
+    .from('context_snapshots')
+    .insert({ snapshot_type: 'weekly_digest', content: snapshotContent });
+
+  if (insertErr) {
+    console.warn('[generate-digest] context_snapshot insert failed:', insertErr.message);
+  } else {
+    console.log(`[generate-digest] digest saved: ${rows.length} items, ${groups.size} groups`);
+  }
+
+  res.json({ digest, total: rows.length, groups: groups.size });
+});
+
 // Local dev only — Vercel handles listening in serverless
 if (process.env.VERCEL !== '1') {
   app.listen(PORT, () => {
