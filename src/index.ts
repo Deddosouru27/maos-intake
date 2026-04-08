@@ -1470,6 +1470,82 @@ app.get('/quality-report', async (_req: Request, res: Response) => {
   });
 });
 
+// Export extracted_knowledge as JSON or CSV for analysis in Excel/NotebookLM
+app.get('/export-knowledge', async (req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const format = (req.query.format as string) === 'csv' ? 'csv' : 'json';
+  const minScore = Math.max(0, Math.min(1, Number(req.query.min_score ?? 0)));
+  const limit = Math.min(Number(req.query.limit ?? 1000), 5000);
+  const days = Math.min(Number(req.query.days ?? 30), 365);
+  const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  const { data: rows, error: fetchErr } = await sb
+    .from('extracted_knowledge')
+    .select('content, knowledge_type, immediate_relevance, strategic_relevance, entities, entity_objects, tags, source_url, source_type, created_at')
+    .gte('immediate_relevance', minScore)
+    .gte('created_at', cutoff)
+    .order('immediate_relevance', { ascending: false })
+    .limit(limit);
+
+  if (fetchErr) {
+    res.status(500).json({ error: fetchErr.message });
+    return;
+  }
+
+  const items = (rows ?? []) as {
+    content: string; knowledge_type: string; immediate_relevance: number; strategic_relevance: number;
+    entities: string[] | null; entity_objects: { name: string; type: string }[] | null;
+    tags: string[] | null; source_url: string; source_type: string; created_at: string;
+  }[];
+
+  if (format === 'csv') {
+    // Manual CSV — no extra dependency
+    const escCsv = (v: string) => `"${v.replace(/"/g, '""')}"`;
+    const header = 'content,knowledge_type,immediate_relevance,strategic_relevance,entities,tags,source_url,source_type,created_at';
+    const csvRows = items.map(r => [
+      escCsv(r.content),
+      r.knowledge_type,
+      r.immediate_relevance.toFixed(3),
+      r.strategic_relevance.toFixed(3),
+      escCsv((r.entities ?? r.tags ?? []).join('; ')),
+      escCsv((r.tags ?? []).join('; ')),
+      escCsv(r.source_url ?? ''),
+      r.source_type ?? '',
+      r.created_at,
+    ].join(','));
+
+    const csv = header + '\n' + csvRows.join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="knowledge_export_${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.send('\uFEFF' + csv); // BOM for Excel compatibility
+  } else {
+    res.json({
+      count: items.length,
+      filters: { min_score: minScore, days, limit },
+      items: items.map(r => ({
+        content: r.content,
+        type: r.knowledge_type,
+        score: r.immediate_relevance,
+        strategic: r.strategic_relevance,
+        entities: r.entities ?? r.tags ?? [],
+        entity_objects: r.entity_objects ?? [],
+        source_url: r.source_url,
+        source_type: r.source_type,
+        created_at: r.created_at,
+      })),
+    });
+  }
+});
+
 app.post('/analyze-trends', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
