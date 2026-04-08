@@ -2375,6 +2375,172 @@ app.post('/recommend', async (req: Request, res: Response) => {
   });
 });
 
+// ── RSS/Atom Feed Aggregator ──────────────────────────────────────────────────
+
+const SEED_FEEDS: { url: string; title: string; source_type: string }[] = [
+  { url: 'https://habr.com/ru/rss/flows/develop/all/', title: 'Habr Dev', source_type: 'blog' },
+  { url: 'https://dev.to/feed', title: 'DEV Community', source_type: 'blog' },
+  { url: 'https://simonwillison.net/atom/everything/', title: 'Simon Willison', source_type: 'blog' },
+  { url: 'https://lilianweng.github.io/index.xml', title: 'Lilian Weng', source_type: 'blog' },
+  { url: 'https://openai.com/blog/rss.xml', title: 'OpenAI Blog', source_type: 'news' },
+  { url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UC_x5XG1OV2P6uZZ5FSM9Ttw', title: 'Google DeepMind', source_type: 'youtube' },
+  { url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCbfYPyITQ-7l4upoX8nvctg', title: 'Two Minute Papers', source_type: 'youtube' },
+  { url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCWN3xxRkmTPphiiT1p3x9zw', title: 'Fireship', source_type: 'youtube' },
+  { url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezykLs9EqgamOA', title: 'Fireship Alt', source_type: 'youtube' },
+];
+
+app.post('/add-feed', async (req: Request, res: Response) => {
+  const { url, title, source_type } = req.body as { url?: string; title?: string; source_type?: string };
+  if (!url) {
+    res.status(400).json({ error: 'url required' });
+    return;
+  }
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  const validTypes = ['youtube', 'blog', 'news', 'newsletter'];
+  const row = {
+    url: url.trim(),
+    title: title ?? null,
+    source_type: validTypes.includes(source_type ?? '') ? source_type : 'blog',
+    active: true,
+    check_interval_hours: 6,
+    total_entries_found: 0,
+    total_processed: 0,
+  };
+
+  const { data, error } = await sb.from('rss_feeds').insert(row).select().single();
+  if (error) {
+    res.status(error.code === '23505' ? 409 : 500).json({ error: error.message });
+    return;
+  }
+  res.json({ feed: data });
+});
+
+app.get('/feeds', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  const { data, error } = await sb.from('rss_feeds').select('*').order('last_checked', { ascending: false, nullsFirst: true });
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ feeds: data ?? [], count: (data ?? []).length });
+});
+
+app.get('/check-feeds', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+  const { default: RSSParser } = await import('rss-parser');
+  const parser = new RSSParser({ timeout: 10000 });
+
+  // Seed if empty
+  const { count: feedCount } = await sb.from('rss_feeds').select('id', { count: 'exact', head: true });
+  if ((feedCount ?? 0) === 0) {
+    console.log('[rss] seeding default feeds');
+    const seedRows = SEED_FEEDS.map(f => ({
+      ...f, active: true, check_interval_hours: 6, total_entries_found: 0, total_processed: 0,
+    }));
+    await sb.from('rss_feeds').insert(seedRows);
+  }
+
+  // Fetch feeds due for check
+  const { data: feeds, error: fetchErr } = await sb
+    .from('rss_feeds')
+    .select('*')
+    .eq('active', true)
+    .or('last_checked.is.null,last_checked.lt.' + new Date(Date.now() - 3600000).toISOString());
+
+  if (fetchErr || !feeds || feeds.length === 0) {
+    res.json({ feeds_checked: 0, new_entries_total: 0 });
+    return;
+  }
+
+  // Filter by check_interval_hours (the .or above uses 1h minimum, refine here)
+  const now = Date.now();
+  const dueFeeds = feeds.filter(f => {
+    if (!f.last_checked) return true;
+    const interval = ((f.check_interval_hours as number) ?? 6) * 3600000;
+    return now - new Date(f.last_checked as string).getTime() >= interval;
+  });
+
+  let feedsChecked = 0;
+  let newEntriesTotal = 0;
+  const details: { feed: string; new_entries: number; error?: string }[] = [];
+
+  for (const feed of dueFeeds) {
+    const feedUrl = feed.url as string;
+    const feedTitle = (feed.title as string) ?? feedUrl;
+    const lastEntryDate = feed.last_entry_date ? new Date(feed.last_entry_date as string) : new Date(0);
+
+    try {
+      const parsed = await parser.parseURL(feedUrl);
+      const newEntries: { link: string; title: string; pubDate: Date }[] = [];
+
+      for (const item of parsed.items ?? []) {
+        if (!item.link) continue;
+        const pubDate = item.pubDate ? new Date(item.pubDate) : new Date();
+        if (pubDate <= lastEntryDate) continue;
+        newEntries.push({ link: item.link, title: item.title ?? '', pubDate });
+      }
+
+      if (newEntries.length > 0) {
+        // Dedup against existing content_discovery
+        const urls = newEntries.map(e => e.link);
+        const { data: existing } = await sb.from('content_discovery').select('url').in('url', urls);
+        const existingUrls = new Set((existing ?? []).map((r: { url: string }) => r.url));
+        const fresh = newEntries.filter(e => !existingUrls.has(e.link));
+
+        if (fresh.length > 0) {
+          const discoveryRows = fresh.map(e => ({
+            url: e.link,
+            title: e.title.slice(0, 500),
+            source: `rss:${feedTitle.slice(0, 50)}`,
+            status: 'pending',
+            topic: feed.source_type ?? 'blog',
+          }));
+          await sb.from('content_discovery').insert(discoveryRows);
+        }
+
+        const maxDate = newEntries.reduce((max, e) => e.pubDate > max ? e.pubDate : max, lastEntryDate);
+        await sb.from('rss_feeds').update({
+          last_checked: new Date().toISOString(),
+          last_entry_date: maxDate.toISOString(),
+          total_entries_found: ((feed.total_entries_found as number) ?? 0) + fresh.length,
+        }).eq('id', feed.id);
+
+        newEntriesTotal += fresh.length;
+        details.push({ feed: feedTitle, new_entries: fresh.length });
+      } else {
+        await sb.from('rss_feeds').update({ last_checked: new Date().toISOString() }).eq('id', feed.id);
+        details.push({ feed: feedTitle, new_entries: 0 });
+      }
+
+      feedsChecked++;
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      console.error(`[rss] feed "${feedTitle}" failed:`, errMsg);
+      // Still update last_checked to avoid hammering broken feeds
+      await sb.from('rss_feeds').update({ last_checked: new Date().toISOString() }).eq('id', feed.id);
+      details.push({ feed: feedTitle, new_entries: 0, error: errMsg.slice(0, 200) });
+      feedsChecked++;
+    }
+  }
+
+  console.log(`[rss] checked ${feedsChecked} feeds, ${newEntriesTotal} new entries`);
+  res.json({ feeds_checked: feedsChecked, new_entries_total: newEntriesTotal, details });
+});
+
 /** POST /triage — per-idea Haiku triage with calibration few-shots. Body: { limit? }. */
 app.post('/triage', async (req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
