@@ -137,8 +137,7 @@ export async function analyzeYouTubeWithGemini(url: string): Promise<BrainAnalys
     contents: [
       {
         parts: [
-          { text: 'Analyze this YouTube video and extract knowledge for MAOS.' },
-          { fileData: { mimeType: 'video/*', fileUri: url } },
+          { text: `Analyze this YouTube video: ${url}\n\nExtract knowledge for MAOS.` },
         ],
       },
     ],
