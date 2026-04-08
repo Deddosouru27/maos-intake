@@ -1214,6 +1214,59 @@ app.post('/process/batch', processLimiter, async (req: Request, res: Response) =
   res.json({ success: true, results, summary: { success: successCount, skipped: skippedCount, errors: errorCount } });
 });
 
+const importLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: { error: 'Import rate limit — max 5 req/min' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.post('/import-urls', importLimiter, async (req: Request, res: Response) => {
+  const { urls } = req.body as { urls?: unknown };
+  if (!Array.isArray(urls) || urls.length === 0) {
+    res.status(400).json({ error: 'urls[] required' });
+    return;
+  }
+  if (urls.length > 50) {
+    res.status(400).json({ error: 'Maximum 50 URLs per request' });
+    return;
+  }
+
+  const results: { url: string; status: string; knowledge_count?: number; error?: string }[] = [];
+
+  for (const raw of urls) {
+    const url = typeof raw === 'string' ? raw.trim() : '';
+    if (!url || !url.startsWith('http')) {
+      results.push({ url, status: 'invalid', error: 'Not a valid URL' });
+      continue;
+    }
+
+    const source = detectSource(url);
+    try {
+      const result = await fullPipeline(url, source);
+      if ('duplicate' in result) {
+        results.push({ url, status: 'duplicate' });
+      } else if ('youtube_unavailable' in result) {
+        results.push({ url, status: result._queued ? 'queued' : 'youtube_unavailable' });
+      } else {
+        results.push({ url, status: 'done', knowledge_count: result.analysis.knowledge_items.length });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[import-urls] failed for ${url}:`, msg);
+      results.push({ url, status: 'failed', error: msg.slice(0, 200) });
+    }
+  }
+
+  const done = results.filter(r => r.status === 'done').length;
+  const failed = results.filter(r => r.status === 'failed').length;
+  const duplicates = results.filter(r => r.status === 'duplicate').length;
+
+  console.log(`[import-urls] ${urls.length} URLs: ${done} done, ${failed} failed, ${duplicates} duplicates`);
+  res.json({ processed: done, failed, duplicates, total: urls.length, results });
+});
+
 /** GET /api/rejected — list URLs rejected by pre-filter (too short, wrong language). Last 50 items. */
 app.get('/api/rejected', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
