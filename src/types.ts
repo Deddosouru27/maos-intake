@@ -35,6 +35,14 @@ export interface EntityObject {
   type: EntityType;
 }
 
+export type EntityRelationshipType = 'uses' | 'built_with' | 'competes_with' | 'part_of' | 'created_by' | 'implements' | 'related_to' | 'co_occurs';
+
+export interface EntityRelationship {
+  source: string;
+  target: string;
+  relationship: EntityRelationshipType;
+}
+
 export interface KnowledgeItem {
   content: string;
   knowledge_type: KnowledgeType;
@@ -49,6 +57,7 @@ export interface KnowledgeItem {
   business_value: string | null;
   tags: string[];
   entity_objects?: EntityObject[];
+  entity_relationships?: EntityRelationship[];
 }
 
 export interface RoutedKnowledgeItem extends KnowledgeItem {

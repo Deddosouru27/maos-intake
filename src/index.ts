@@ -565,11 +565,12 @@ async function runPipeline(
     console.error('[PIPELINE] ideas failed:', e instanceof Error ? e.message : String(e));
   }
 
-  // Upsert entity graph — collect all entity_objects from saved items
+  // Upsert entity graph — collect all entity_objects and relationships from saved items
   try {
     const allEntityObjects = itemsToSave.flatMap(i => i.entity_objects ?? []);
+    const allEntityRelationships = itemsToSave.flatMap(i => i.entity_relationships ?? []);
     if (allEntityObjects.length > 0) {
-      await upsertEntityGraph(allEntityObjects);
+      await upsertEntityGraph(allEntityObjects, allEntityRelationships);
     }
   } catch (e) {
     console.error('[PIPELINE] entity_graph failed (non-fatal):', e instanceof Error ? e.message : String(e));
@@ -1500,6 +1501,187 @@ app.post('/backfill-entities', async (_req: Request, res: Response) => {
   }
   const result = await runEntityBackfill();
   res.json(result);
+});
+
+/**
+ * POST /backfill-edge-types — replace co_occurs edges with inferred relationship types.
+ * Rules: tool+tool→competes_with, person+tool→uses, tool+concept→implements, etc.
+ * Returns: { updated, total_co_occurs }.
+ */
+app.post('/backfill-edge-types', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  // Fetch all co_occurs edges
+  const { data: edges, error: fetchErr } = await sb
+    .from('entity_edges')
+    .select('id, source_id, target_id, relationship')
+    .eq('relationship', 'co_occurs');
+
+  if (fetchErr || !edges || edges.length === 0) {
+    res.json({ updated: 0, total_co_occurs: 0 });
+    return;
+  }
+
+  // Fetch all nodes for type lookup
+  const nodeIds = new Set<string>();
+  for (const e of edges) {
+    nodeIds.add(e.source_id as string);
+    nodeIds.add(e.target_id as string);
+  }
+  const { data: nodes } = await sb
+    .from('entity_nodes')
+    .select('id, type')
+    .in('id', [...nodeIds]);
+
+  const typeById = new Map<string, string>();
+  for (const n of (nodes ?? [])) {
+    typeById.set(n.id as string, (n.type as string) ?? 'concept');
+  }
+
+  // Infer relationship rules: tool+tool→competes_with, person+tool→uses, tool+concept→implements, default→related_to
+  function infer(srcType: string, tgtType: string): string {
+    const key = `${srcType}+${tgtType}`;
+    switch (key) {
+      case 'tool+tool': return 'competes_with';
+      case 'person+tool': return 'uses';
+      case 'tool+person': return 'created_by';
+      case 'tool+concept': return 'implements';
+      case 'concept+tool': return 'implements';
+      case 'person+project': return 'created_by';
+      case 'project+tool': return 'built_with';
+      case 'tool+project': return 'built_with';
+      default: return 'related_to';
+    }
+  }
+
+  let updated = 0;
+  for (const edge of edges) {
+    const srcType = typeById.get(edge.source_id as string) ?? 'concept';
+    const tgtType = typeById.get(edge.target_id as string) ?? 'concept';
+    const newRel = infer(srcType, tgtType);
+
+    const { error: upErr } = await sb
+      .from('entity_edges')
+      .update({ relationship: newRel })
+      .eq('id', edge.id);
+
+    if (!upErr) updated++;
+  }
+
+  console.log(`[backfill-edge-types] updated ${updated}/${edges.length} edges from co_occurs`);
+  res.json({ updated, total_co_occurs: edges.length });
+});
+
+/**
+ * POST /label-clusters — auto-label knowledge clusters via keyword extraction.
+ * Zero LLM cost: uses TF-IDF-like word frequency on cluster content.
+ * Upserts labels to knowledge_clusters table.
+ * Returns: { labeled, clusters[] }.
+ */
+app.post('/label-clusters', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  // Fetch clusters: group by cluster_id, collect content ordered by score
+  const { data: rows, error: fetchErr } = await sb
+    .from('extracted_knowledge')
+    .select('cluster_id, content, immediate_relevance')
+    .not('cluster_id', 'is', null)
+    .order('immediate_relevance', { ascending: false });
+
+  if (fetchErr || !rows || rows.length === 0) {
+    res.json({ labeled: 0, clusters: [] });
+    return;
+  }
+
+  // Group by cluster_id
+  const clusters = new Map<string, string[]>();
+  for (const row of rows) {
+    const cid = String(row.cluster_id);
+    if (!clusters.has(cid)) clusters.set(cid, []);
+    clusters.get(cid)!.push(row.content as string);
+  }
+
+  // Stopwords (ru + en) for keyword extraction
+  const STOPWORDS = new Set([
+    // Russian
+    'и', 'в', 'на', 'с', 'по', 'для', 'из', 'к', 'от', 'до', 'не', 'что', 'как',
+    'это', 'при', 'все', 'уже', 'его', 'или', 'но', 'то', 'так', 'бы', 'же',
+    'об', 'без', 'за', 'их', 'ещё', 'через', 'может', 'можно', 'также', 'более',
+    'между', 'после', 'перед', 'только', 'будет', 'были', 'быть', 'был', 'была',
+    'который', 'которые', 'которая', 'которое', 'этот', 'эта', 'эти',
+    // English
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should',
+    'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for', 'on', 'with', 'at',
+    'by', 'from', 'as', 'into', 'through', 'during', 'before', 'after', 'above',
+    'below', 'between', 'out', 'off', 'over', 'under', 'again', 'further', 'then',
+    'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each', 'every',
+    'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'not', 'only',
+    'same', 'so', 'than', 'too', 'very', 'just', 'because', 'but', 'and', 'or',
+    'if', 'while', 'about', 'up', 'that', 'this', 'it', 'its', 'they', 'them',
+    'their', 'what', 'which', 'who', 'whom', 'these', 'those', 'am',
+    'using', 'use', 'used', 'new', 'like', 'also', 'one', 'two',
+  ]);
+
+  // Extract top-3 keywords from cluster content via word frequency
+  function extractKeywords(texts: string[]): string {
+    const top5 = texts.slice(0, 5);
+    const freq = new Map<string, number>();
+
+    for (const text of top5) {
+      // Extract words 3+ chars, skip stopwords
+      const words = text.toLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, ' ').split(/\s+/);
+      const seen = new Set<string>(); // count each word once per text (TF-IDF-like)
+      for (const w of words) {
+        if (w.length < 3 || STOPWORDS.has(w) || /^\d+$/.test(w)) continue;
+        if (seen.has(w)) continue;
+        seen.add(w);
+        freq.set(w, (freq.get(w) ?? 0) + 1);
+      }
+    }
+
+    // Sort by frequency desc, take top 3
+    const sorted = [...freq.entries()].sort((a, b) => b[1] - a[1]);
+    const keywords = sorted.slice(0, 3).map(([w]) => w.charAt(0).toUpperCase() + w.slice(1));
+    return keywords.join(', ') || 'Uncategorized';
+  }
+
+  const results: { cluster_id: string; label: string; count: number }[] = [];
+
+  for (const [cid, contents] of clusters) {
+    const label = extractKeywords(contents);
+    const count = contents.length;
+
+    // Upsert to knowledge_clusters
+    const { error: upsErr } = await sb
+      .from('knowledge_clusters')
+      .upsert({ cluster_id: cid, label, count, updated_at: new Date().toISOString() }, { onConflict: 'cluster_id' });
+
+    if (upsErr) {
+      console.error(`[label-clusters] upsert failed for cluster ${cid}:`, upsErr.message);
+    } else {
+      results.push({ cluster_id: cid, label, count });
+    }
+  }
+
+  console.log(`[label-clusters] labeled ${results.length} clusters`);
+  res.json({ labeled: results.length, clusters: results });
 });
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

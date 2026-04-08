@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
-import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, EntityObject } from '../types';
+import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, EntityObject, EntityRelationship, EntityRelationshipType } from '../types';
 
 const openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -420,9 +420,26 @@ export async function saveExtractedKnowledge(
   return { saved, dedupSkipped, smartCrudUpdates };
 }
 
+// Infer relationship type from entity types when no explicit relationship given
+function inferRelationship(sourceType: string, targetType: string): EntityRelationshipType {
+  const key = `${sourceType}+${targetType}`;
+  switch (key) {
+    case 'tool+tool': return 'competes_with';
+    case 'person+tool': return 'uses';
+    case 'tool+person': return 'created_by';
+    case 'tool+concept': return 'implements';
+    case 'concept+tool': return 'implements';
+    case 'person+project': return 'created_by';
+    case 'project+tool': return 'built_with';
+    case 'tool+project': return 'built_with';
+    default: return 'related_to';
+  }
+}
+
 // Upsert entity_nodes and entity_edges for graph population
 export async function upsertEntityGraph(
   entityObjects: EntityObject[],
+  entityRelationships?: EntityRelationship[],
 ): Promise<void> {
   if (!entityObjects || entityObjects.length === 0) return;
 
@@ -487,19 +504,40 @@ export async function upsertEntityGraph(
       .eq('id', node.id);
   }
 
-  // Build co-occurrence edges for all unique pairs
-  const nodeIds = [...nodeIdMap.values()];
-  if (nodeIds.length < 2) return;
+  // Build edges — use explicit relationships when available, infer from types otherwise
+  const nodeNames = [...nodeIdMap.keys()];
+  if (nodeNames.length < 2 && (!entityRelationships || entityRelationships.length === 0)) return;
 
   const edgeRows: { source_id: string; target_id: string; relationship: string; weight: number }[] = [];
-  for (let i = 0; i < nodeIds.length - 1; i++) {
-    for (let j = i + 1; j < nodeIds.length; j++) {
-      edgeRows.push({
-        source_id: nodeIds[i],
-        target_id: nodeIds[j],
-        relationship: 'co_occurs',
-        weight: 1,
-      });
+  const edgeSeen = new Set<string>();
+
+  // 1. Explicit relationships from LLM extraction
+  if (entityRelationships && entityRelationships.length > 0) {
+    for (const rel of entityRelationships) {
+      const srcId = nodeIdMap.get(rel.source);
+      const tgtId = nodeIdMap.get(rel.target);
+      if (!srcId || !tgtId || srcId === tgtId) continue;
+      const edgeKey = `${srcId}:${tgtId}:${rel.relationship}`;
+      if (edgeSeen.has(edgeKey)) continue;
+      edgeSeen.add(edgeKey);
+      edgeRows.push({ source_id: srcId, target_id: tgtId, relationship: rel.relationship, weight: 2 });
+    }
+  }
+
+  // 2. Inferred relationships for remaining pairs (type-based heuristic)
+  const typeByName = new Map(unique.map(e => [e.name, e.type]));
+  for (let i = 0; i < nodeNames.length - 1; i++) {
+    for (let j = i + 1; j < nodeNames.length; j++) {
+      const srcId = nodeIdMap.get(nodeNames[i]);
+      const tgtId = nodeIdMap.get(nodeNames[j]);
+      if (!srcId || !tgtId) continue;
+      // Skip if explicit relationship already covers this pair
+      if (edgeSeen.has(`${srcId}:${tgtId}:${inferRelationship(typeByName.get(nodeNames[i]) ?? 'concept', typeByName.get(nodeNames[j]) ?? 'concept')}`)) continue;
+      const rel = inferRelationship(typeByName.get(nodeNames[i]) ?? 'concept', typeByName.get(nodeNames[j]) ?? 'concept');
+      const edgeKey = `${srcId}:${tgtId}:${rel}`;
+      if (edgeSeen.has(edgeKey)) continue;
+      edgeSeen.add(edgeKey);
+      edgeRows.push({ source_id: srcId, target_id: tgtId, relationship: rel, weight: 1 });
     }
   }
 
