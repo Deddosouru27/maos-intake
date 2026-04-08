@@ -2585,6 +2585,76 @@ app.get('/check-feeds', async (_req: Request, res: Response) => {
   res.json({ feeds_checked: feedsChecked, new_entries_total: newEntriesTotal, details });
 });
 
+/** GET /stats/feeds — RSS feed stats for Runner scheduling. */
+app.get('/stats/feeds', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+  const sb = createClient(pitstopUrl, pitstopKey);
+
+  const { data, error } = await sb.rpc('get_feed_stats').maybeSingle() as { data: unknown; error: unknown };
+  if (error || !data) {
+    // Fallback: manual aggregate
+    const { data: feeds, error: feedsErr } = await sb.from('rss_feeds').select('active,total_entries_found,total_processed,last_checked');
+    if (feedsErr) { res.status(500).json({ error: String(feedsErr) }); return; }
+    const rows = (feeds ?? []) as { active: boolean; total_entries_found: number; total_processed: number; last_checked: string | null }[];
+    const total_feeds = rows.length;
+    const active = rows.filter((r) => r.active).length;
+    const total_entries = rows.reduce((s, r) => s + (r.total_entries_found || 0), 0);
+    const processed = rows.reduce((s, r) => s + (r.total_processed || 0), 0);
+    const last_check = rows.map((r) => r.last_checked).filter(Boolean).sort().pop() ?? null;
+    res.json({ total_feeds, active, total_entries, processed, last_check });
+    return;
+  }
+  res.json(data);
+});
+
+/** POST /process-rss — process pending RSS entries through fullPipeline. */
+app.post('/process-rss', processLimiter, async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+  const sb = createClient(pitstopUrl, pitstopKey);
+
+  const { data: pending, error } = await sb
+    .from('content_discovery')
+    .select('id,url,title')
+    .ilike('source', 'rss:%')
+    .eq('processing_status', 'pending')
+    .limit(5);
+
+  if (error) { res.status(500).json({ error: String(error) }); return; }
+  if (!pending || pending.length === 0) { res.json({ processed: 0, failed: 0, remaining: 0 }); return; }
+
+  let processed = 0;
+  let failed = 0;
+
+  for (const entry of pending as { id: string; url: string; title: string | null }[]) {
+    try {
+      const source: Source = detectSource(entry.url);
+      const result = await fullPipeline(entry.url, source);
+      if ('duplicate' in result || 'youtube_unavailable' in result) {
+        await sb.from('content_discovery').update({ processing_status: 'skipped' }).eq('id', entry.id);
+      } else {
+        await sb.from('content_discovery').update({ processing_status: 'processed' }).eq('id', entry.id);
+        processed++;
+      }
+    } catch (e) {
+      console.error(`[process-rss] failed ${entry.url}:`, e instanceof Error ? e.message : String(e));
+      await sb.from('content_discovery').update({ processing_status: 'failed' }).eq('id', entry.id);
+      failed++;
+    }
+  }
+
+  const { count } = await sb
+    .from('content_discovery')
+    .select('id', { count: 'exact', head: true })
+    .ilike('source', 'rss:%')
+    .eq('processing_status', 'pending');
+
+  res.json({ processed, failed, remaining: count ?? 0 });
+});
+
 /** POST /triage — per-idea Haiku triage with calibration few-shots. Body: { limit? }. */
 app.post('/triage', async (req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
