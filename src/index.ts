@@ -1565,6 +1565,84 @@ app.post('/auto-discover', async (req: Request, res: Response) => {
   res.json({ discovered: total, by_topic: counts });
 });
 
+// Process pending items from content_discovery → fullPipeline each → update status
+app.post('/process-discovery', processLimiter, async (req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const limit = Math.min(Number(req.body?.limit ?? 5), 20);
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  // Fetch pending discovery items
+  const { data: pending, error: fetchErr } = await sb
+    .from('content_discovery')
+    .select('id, url, source, title')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(limit);
+
+  if (fetchErr) {
+    res.status(500).json({ error: fetchErr.message });
+    return;
+  }
+  if (!pending || pending.length === 0) {
+    // Count remaining
+    const { count } = await sb.from('content_discovery').select('id', { count: 'exact', head: true }).eq('status', 'pending');
+    res.json({ processed: 0, failed: 0, remaining: count ?? 0 });
+    return;
+  }
+
+  let processed = 0;
+  let failed = 0;
+  const details: { url: string; status: string; error?: string }[] = [];
+
+  for (const item of pending) {
+    const url = item.url as string;
+    const source = detectSource(url, (item.source as string) ?? undefined);
+
+    // Mark as processing
+    await sb.from('content_discovery').update({ status: 'processing' }).eq('id', item.id);
+
+    try {
+      const result = await fullPipeline(url, source);
+
+      if ('duplicate' in result) {
+        await sb.from('content_discovery').update({ status: 'duplicate' }).eq('id', item.id);
+        details.push({ url, status: 'duplicate' });
+      } else if ('youtube_unavailable' in result) {
+        await sb.from('content_discovery').update({ status: 'failed', error: 'youtube_unavailable' }).eq('id', item.id);
+        details.push({ url, status: 'youtube_unavailable' });
+        failed++;
+      } else {
+        await sb.from('content_discovery').update({
+          status: 'done',
+          processed_at: new Date().toISOString(),
+        }).eq('id', item.id);
+        details.push({ url, status: 'done' });
+        processed++;
+      }
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      console.error(`[process-discovery] failed for ${url}:`, errMsg);
+      await sb.from('content_discovery').update({ status: 'failed', error: errMsg.slice(0, 500) }).eq('id', item.id);
+      details.push({ url, status: 'failed', error: errMsg.slice(0, 200) });
+      failed++;
+    }
+  }
+
+  // Count remaining
+  const { count: remaining } = await sb.from('content_discovery').select('id', { count: 'exact', head: true }).eq('status', 'pending');
+
+  console.log(`[process-discovery] processed=${processed} failed=${failed} remaining=${remaining ?? '?'}`);
+  res.json({ processed, failed, remaining: remaining ?? 0, details });
+});
+
 app.post('/triage', async (req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
