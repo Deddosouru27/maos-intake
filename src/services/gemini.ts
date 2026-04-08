@@ -15,17 +15,42 @@ Return ONLY valid JSON, no markdown:
   "relevant": true,
   "full_transcript": "500+ word detailed summary of everything said in the video",
   "summary": "One specific sentence about the core value",
-  "key_insights": ["Concrete technique or finding — max 6"],
-  "entities": [{"name": "ToolName", "type": "tool|project|person|concept"}],
-  "actionable_ideas": ["Implement: specific action with specific tool — max 4"],
-  "tags": ["specific-tag"],
+  "key_insights": [
+    {
+      "c": "Concrete technique or fact — one specific actionable sentence",
+      "tags": ["Tag-Specific-To-This-Point"],
+      "entities": [{"name": "ToolName", "type": "tool|project|person|concept"}]
+    }
+  ],
+  "actionable_ideas": [
+    {
+      "c": "Implement: specific action with specific tool",
+      "tags": ["Tag-Specific-To-This-Idea"],
+      "entities": [{"name": "ToolName", "type": "tool"}]
+    }
+  ],
   "relevance_score": 0.8
 }
 
+QUANTITY RULES:
+- Extract ALL valuable insights from the video. Do NOT limit to a fixed number.
+- Short video (< 5 min) → typically 1-3 insights.
+- Long detailed video (> 30 min) → may have 15-30 insights.
+- Do NOT pad with filler. Do NOT skip real insights to fit a number.
+- Each item must be a concrete actionable technique or fact, not a summary.
+
+PER-ITEM TAGS AND ENTITIES:
+- Each insight MUST have its OWN tags and entities specific to THAT point.
+- BAD: all items have tags ["LangGraph","Claude","Tavily","AI-Orchestration"]
+- GOOD example — video about LangGraph multi-agent:
+  Item 1: { c: "Tavily Search API дает структурированные данные для LLM", tags: ["Tavily","Search-API"], entities: [{"name":"Tavily","type":"tool"}] }
+  Item 2: { c: "Supervisor pattern снижает галлюцинации в multi-agent", tags: ["Multi-Agent","Supervisor-Pattern"], entities: [{"name":"LangGraph","type":"tool"}] }
+  Item 3: { c: "PostgreSQL checkpoints включают async workflows", tags: ["PostgreSQL","State-Management"], entities: [{"name":"PostgreSQL","type":"tool"},{"name":"Supabase","type":"tool"}] }
+
 QUALITY RULES:
-- BAD: "Видео рассматривает подходы к автоматизации"
-- GOOD: "pgvector HNSW index 10x faster than IVFFlat for vectors under 1M"
-- Tags: specific — "Supabase Edge Functions" not "technology"
+- BAD insight: "Видео рассматривает подходы к автоматизации"
+- GOOD insight: "pgvector HNSW index 10x faster than IVFFlat for vectors under 1M"
+- Tags: 1-3 per item, specific — "Supabase Edge Functions" not "technology"
 - Entities: proper nouns only — tools, projects, people. NEVER: "AI", "фреймворк", "мониторинг"
 - Ideas must start with verb: Добавить/Настроить/Мигрировать/Внедрить
 - SCORING: 0.8+ = actionable this week with Node.js/TS/Supabase/Claude/Vercel stack. 0.5–0.7 = strategic. <0.3 = generic/off-topic
@@ -64,49 +89,71 @@ function buildBrainAnalysis(parsed: ReturnType<typeof parseGeminiJSON>): BrainAn
   }
 
   const score: number = typeof parsed.relevance_score === 'number' ? parsed.relevance_score : 0.5;
-  const tags: string[] = Array.isArray(parsed.tags) ? parsed.tags : [];
-  const entityObjects: EntityObject[] = (parsed.entities ?? []).map(
-    (e: { name: string; type: string }): EntityObject => ({
-      name: e.name,
-      type: (['tool', 'project', 'concept', 'person'].includes(e.type)
-        ? e.type
-        : 'concept') as EntityObject['type'],
-    }),
-  );
 
-  const insights: KnowledgeItem[] = (parsed.key_insights ?? []).map((c: string): KnowledgeItem => ({
-    knowledge_type: 'insight' as KnowledgeType,
-    content: c,
-    business_value: null,
-    strategic_relevance: score * 0.85,
-    immediate_relevance: score,
-    project: null,
-    domains: tags,
-    solves_need: null,
-    novelty: 0.6,
-    effort: 'medium' as EffortLevel,
-    has_ready_code: false,
-    tags,
-    entity_objects: entityObjects,
-  }));
+  function toEntityObjects(raw: unknown[]): EntityObject[] {
+    return raw.map((e: unknown): EntityObject => {
+      const obj = e as { name?: string; type?: string };
+      return {
+        name: obj.name ?? '',
+        type: (['tool', 'project', 'concept', 'person'].includes(obj.type ?? '')
+          ? obj.type
+          : 'concept') as EntityObject['type'],
+      };
+    }).filter((e) => e.name);
+  }
 
-  const ideas: KnowledgeItem[] = (parsed.actionable_ideas ?? []).map((c: string): KnowledgeItem => ({
-    knowledge_type: 'actionable_idea' as KnowledgeType,
-    content: c,
-    business_value: null,
-    strategic_relevance: score,
-    immediate_relevance: score,
-    project: null,
-    domains: tags,
-    solves_need: null,
-    novelty: 0.6,
-    effort: 'medium' as EffortLevel,
-    has_ready_code: false,
-    tags,
-    entity_objects: [],
-  }));
+  // key_insights: array of {c, tags, entities} objects (new format)
+  // or fallback to string[] (old format)
+  type InsightItem = { c?: string; tags?: string[]; entities?: unknown[] } | string;
+  const insights: KnowledgeItem[] = (parsed.key_insights ?? []).map((item: InsightItem): KnowledgeItem => {
+    const isObj = typeof item === 'object' && item !== null;
+    const content = isObj ? ((item as { c?: string }).c ?? '') : (item as string);
+    const itemTags: string[] = isObj ? ((item as { tags?: string[] }).tags ?? []) : [];
+    const itemEntities = toEntityObjects(isObj ? ((item as { entities?: unknown[] }).entities ?? []) : []);
+    return {
+      knowledge_type: 'insight' as KnowledgeType,
+      content,
+      business_value: null,
+      strategic_relevance: score * 0.85,
+      immediate_relevance: score,
+      project: null,
+      domains: itemTags,
+      solves_need: null,
+      novelty: 0.6,
+      effort: 'medium' as EffortLevel,
+      has_ready_code: false,
+      tags: itemTags,
+      entity_objects: itemEntities,
+    };
+  });
+
+  type IdeaItem = { c?: string; tags?: string[]; entities?: unknown[] } | string;
+  const ideas: KnowledgeItem[] = (parsed.actionable_ideas ?? []).map((item: IdeaItem): KnowledgeItem => {
+    const isObj = typeof item === 'object' && item !== null;
+    const content = isObj ? ((item as { c?: string }).c ?? '') : (item as string);
+    const itemTags: string[] = isObj ? ((item as { tags?: string[] }).tags ?? []) : [];
+    const itemEntities = toEntityObjects(isObj ? ((item as { entities?: unknown[] }).entities ?? []) : []);
+    return {
+      knowledge_type: 'actionable_idea' as KnowledgeType,
+      content,
+      business_value: null,
+      strategic_relevance: score,
+      immediate_relevance: score,
+      project: null,
+      domains: itemTags,
+      solves_need: null,
+      novelty: 0.6,
+      effort: 'medium' as EffortLevel,
+      has_ready_code: false,
+      tags: itemTags,
+      entity_objects: itemEntities,
+    };
+  });
 
   const knowledge_items = [...insights, ...ideas];
+
+  // Collect all unique entity names for the top-level entities field
+  const allEntityNames = [...new Set(knowledge_items.flatMap((i) => i.entity_objects?.map((e) => e.name) ?? []))];
 
   return {
     summary: parsed.summary ?? '',
@@ -117,7 +164,7 @@ function buildBrainAnalysis(parsed: ReturnType<typeof parseGeminiJSON>): BrainAn
     priority_reason: '',
     category: 'video',
     language: 'ru',
-    entities: (parsed.entities ?? []).map((e: { name: string }) => e.name),
+    entities: allEntityNames,
     // Store full_transcript in _haiku_raw so it gets saved to ingested_content.haiku_raw_response
     _haiku_raw: parsed.full_transcript ?? undefined,
   };
