@@ -1828,6 +1828,152 @@ app.post('/auto-triage', async (_req: Request, res: Response) => {
   res.json({ success: true, approved: totalApproved, rejected: totalRejected, tasks: totalTasks, errors: totalErrors, report });
 });
 
+// T517: Bulk triage — keyword heuristics, no LLM cost
+// Scores relevance/effort/impact, classifies top→approved, bottom→rejected, rest→review
+app.post('/triage-all', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  // Fetch all untriaged ideas
+  const { data: ideas, error: fetchErr } = await sb
+    .from('ideas')
+    .select('id, content, relevance, ai_category, source_type, source')
+    .or("status.eq.new,status.is.null")
+    .order('created_at', { ascending: true });
+
+  if (fetchErr) {
+    res.status(500).json({ error: fetchErr.message });
+    return;
+  }
+  if (!ideas || ideas.length === 0) {
+    res.json({ processed: 0, approved: 0, rejected: 0, review: 0 });
+    return;
+  }
+
+  // Keyword-based scoring heuristics
+  const HIGH_RELEVANCE = ['maos', 'autorun', 'agent', 'pipeline', 'intake', 'pitstop', 'runner',
+    'supabase', 'claude', 'haiku', 'anthropic', 'vercel', 'telegram', 'pgvector',
+    'typescript', 'node.js', 'express', 'embedding', 'vector', 'rag'];
+  const MEDIUM_RELEVANCE = ['react', 'vite', 'tailwind', 'api', 'webhook', 'cron',
+    'docker', 'ci/cd', 'github', 'deploy', 'monitoring', 'logging', 'auth'];
+  const REJECT_SIGNALS = ['мотивация', 'motivation', 'mindset', 'productivity hack',
+    'soft skill', 'leadership', 'career advice', 'generic'];
+  const ACTION_VERBS = ['добавить', 'настроить', 'мигрировать', 'внедрить', 'implement',
+    'add', 'configure', 'integrate', 'build', 'create', 'set up', 'automate'];
+
+  type ScoredIdea = {
+    id: string;
+    content: string;
+    relevance: number;
+    effort: number;
+    impact: number;
+    priority: number;
+  };
+
+  const scored: ScoredIdea[] = ideas.map(idea => {
+    const text = ((idea.content as string) ?? '').toLowerCase();
+    const rel = idea.relevance as string | null;
+
+    // Relevance (0-10)
+    let relevance = 5; // baseline
+    for (const kw of HIGH_RELEVANCE) {
+      if (text.includes(kw)) { relevance += 1.5; break; }
+    }
+    for (const kw of MEDIUM_RELEVANCE) {
+      if (text.includes(kw)) { relevance += 0.5; break; }
+    }
+    for (const kw of REJECT_SIGNALS) {
+      if (text.includes(kw)) { relevance -= 3; break; }
+    }
+    if (rel === 'hot') relevance += 1;
+    if (rel === 'strategic') relevance += 0.5;
+    // Actionable verb bonus
+    if (ACTION_VERBS.some(v => text.startsWith(v))) relevance += 1;
+    relevance = Math.max(0, Math.min(10, relevance));
+
+    // Effort (1-5): short = low effort, long = high effort
+    const wordCount = text.split(/\s+/).length;
+    const effort = wordCount < 15 ? 2 : wordCount < 40 ? 3 : 4;
+
+    // Impact (1-5): based on relevance signal + category
+    const cat = (idea.ai_category as string) ?? '';
+    let impact = 3;
+    if (cat === 'actionable_idea' || cat === 'tool_or_library') impact = 4;
+    if (cat === 'architecture_pattern') impact = 4;
+    if (rel === 'hot') impact = Math.min(5, impact + 1);
+    if (REJECT_SIGNALS.some(kw => text.includes(kw))) impact = 1;
+
+    const priority = effort > 0 ? (relevance * impact) / effort : 0;
+
+    return { id: idea.id as string, content: text.slice(0, 100), relevance, effort, impact, priority };
+  });
+
+  // Sort by priority descending
+  scored.sort((a, b) => b.priority - a.priority);
+
+  // Top 20 → approved, bottom 50 → rejected, rest → review
+  const topN = Math.min(20, Math.floor(scored.length * 0.15));
+  const bottomN = Math.min(50, Math.floor(scored.length * 0.35));
+
+  let approved = 0;
+  let rejected = 0;
+  let review = 0;
+  const now = new Date().toISOString();
+
+  for (let i = 0; i < scored.length; i++) {
+    const item = scored[i];
+    let status: string;
+    let priorityScore: number | null = null;
+
+    if (i < topN) {
+      status = 'approved';
+      priorityScore = item.priority;
+      approved++;
+    } else if (i >= scored.length - bottomN) {
+      status = 'rejected';
+      rejected++;
+    } else {
+      status = 'review';
+      priorityScore = item.priority;
+      review++;
+    }
+
+    await sb.from('ideas').update({
+      status,
+      priority_score: priorityScore,
+      reviewed_by: 'keyword-triage',
+      reviewed_at: now,
+    }).eq('id', item.id);
+  }
+
+  // Log to agent_action_log
+  try {
+    await sb.from('agent_action_log').insert({
+      agent: 'intaker', action: 'triage_all', status: 'done',
+      details: { total: scored.length, approved, rejected, review, top_5: scored.slice(0, 5).map(s => ({ id: s.id, priority: +s.priority.toFixed(2) })) },
+      repo: 'maos-intake',
+    });
+  } catch { /* non-fatal */ }
+
+  console.log(`[triage-all] ${scored.length} ideas: ${approved} approved, ${rejected} rejected, ${review} review`);
+
+  res.json({
+    processed: scored.length,
+    approved,
+    rejected,
+    review,
+    top_5: scored.slice(0, 5).map(s => ({ id: s.id, content: s.content, priority: +s.priority.toFixed(2), relevance: s.relevance, impact: s.impact, effort: s.effort })),
+    bottom_5: scored.slice(-5).map(s => ({ id: s.id, content: s.content, priority: +s.priority.toFixed(2) })),
+  });
+});
+
 app.get('/heartbeat', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
