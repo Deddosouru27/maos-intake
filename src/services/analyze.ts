@@ -287,7 +287,8 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
   "entities": ["Supabase", "Claude Code", "MAOS"]
 }`;
 
-  const EXTRACTION_MAX_TOKENS = 1024;
+  // 2048 per CLAUDE.md spec — 5-8 items × ~200 tokens each requires headroom
+  const EXTRACTION_MAX_TOKENS = 2048;
   console.log(`[INTAKE] Haiku extraction call: max_tokens=${EXTRACTION_MAX_TOKENS}, prompt_len=${userPrompt.length}`);
   const message = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
