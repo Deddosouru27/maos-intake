@@ -605,7 +605,36 @@ async function runPipeline(
 }
 
 interface PipelineDiag { haikuItems: number; itemsToSave: number; savedItems: number; dedupSkipped: number; smartCrudUpdates: number; haikuRaw: string | null }
-async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis; diag: PipelineDiag } | { duplicate: true } | { youtube_unavailable: true; _gemini_error?: string }> {
+
+// T490: Queue YouTube URL to content_discovery for Runner processing (no egress restrictions)
+async function queueYouTubeForRunner(url: string, reason: string): Promise<boolean> {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) return false;
+  try {
+    const sb = createClient(pitstopUrl, pitstopKey);
+    // Check if already queued
+    const { data: existing } = await sb.from('content_discovery').select('id').eq('url', url).limit(1);
+    if (existing && existing.length > 0) {
+      console.log(`[youtube-queue] already queued: ${url}`);
+      return true;
+    }
+    const { error } = await sb.from('content_discovery').insert({
+      url, source: 'youtube_queue', status: 'pending_youtube', title: null, topic: reason,
+    });
+    if (error) {
+      console.error('[youtube-queue] insert failed:', error.message);
+      return false;
+    }
+    console.log(`[youtube-queue] queued for Runner: ${url} (${reason})`);
+    return true;
+  } catch (e) {
+    console.error('[youtube-queue] error:', e instanceof Error ? e.message : String(e));
+    return false;
+  }
+}
+
+async function fullPipeline(url: string, source: Source): Promise<{ notification: string; analysis: BrainAnalysis; diag: PipelineDiag } | { duplicate: true } | { youtube_unavailable: true; _gemini_error?: string; _queued?: boolean }> {
   // 45s hard timeout — Vercel maxDuration is 60s, leaves buffer for network
   const timeoutId = setTimeout(() => {
     throw new Error('[INTAKE] Pipeline timeout (45s)');
@@ -637,7 +666,8 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
       const fetched = await fetchRawContent(url, source);
 
       if (fetched.youtube_unavailable) {
-        return { youtube_unavailable: true };
+        const queued = await queueYouTubeForRunner(url, 'transcript_unavailable');
+        return { youtube_unavailable: true, _queued: queued };
       }
 
       rawText = fetched.rawText;
@@ -746,14 +776,16 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
             const transcriptFetched = await fetchRawContent(url, source);
             if (transcriptFetched.youtube_unavailable || transcriptFetched.rawText.length < 30) {
               if (ingestedId) await updateIngestedDone(ingestedId, failedAnalysis, 'youtube_unavailable', 0, false, 'failed');
-              return { youtube_unavailable: true, _gemini_error: geminiErrMsg.slice(0, 300) };
+              const queued = await queueYouTubeForRunner(url, 'gemini_and_transcript_failed');
+              return { youtube_unavailable: true, _gemini_error: geminiErrMsg.slice(0, 300), _queued: queued };
             }
             rawText = transcriptFetched.rawText;
             title = transcriptFetched.title;
           } catch (transcriptErr) {
             console.warn('[PIPELINE] Transcript fallback also failed:', transcriptErr instanceof Error ? transcriptErr.message : String(transcriptErr));
             if (ingestedId) await updateIngestedDone(ingestedId, failedAnalysis, 'failed', 0, false, geminiErrMsg.slice(0, 200));
-            return { youtube_unavailable: true, _gemini_error: geminiErrMsg.slice(0, 300) };
+            const queued = await queueYouTubeForRunner(url, 'gemini_and_transcript_exception');
+            return { youtube_unavailable: true, _gemini_error: geminiErrMsg.slice(0, 300), _queued: queued };
           }
         }
         console.log('[PIPELINE] Falling back to Haiku with transcript:', rawText.length, 'chars');
@@ -866,13 +898,17 @@ app.post('/process', processLimiter, async (req: Request, res: Response) => {
       isPipelineValidationError,
     );
     if ('youtube_unavailable' in result) {
+      const queued = '_queued' in result && result._queued;
       res.json({
         success: true,
-        status: 'youtube_unavailable',
+        status: queued ? 'queued_for_runner' : 'youtube_unavailable',
         knowledge_count: 0,
         source_url: url,
-        notification: '🎬 YouTube временно недоступен на этом сервере. Скопируй транскрипт через youtubetotranscript.com и отправь текстом',
+        notification: queued
+          ? '📋 YouTube URL добавлен в очередь для Runner (обработается на ноутбуке)'
+          : '🎬 YouTube временно недоступен. Скопируй транскрипт через youtubetotranscript.com и отправь текстом',
         _gemini_error: result._gemini_error,
+        _queued: queued,
         _retry: { attempts },
       });
     } else if ('duplicate' in result) {
