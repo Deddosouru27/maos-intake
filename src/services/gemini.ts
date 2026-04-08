@@ -7,13 +7,17 @@ import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel, EntityObject 
 // gemini-2.0-flash, gemini-1.5-flash-latest, gemini-1.5-flash-002
 const MODEL_ID = 'gemini-2.0-flash';
 
-const SYSTEM_PROMPT = `You are a knowledge extraction engine analyzing a YouTube video.
-ALWAYS respond in Russian. All content, summary, and insights must be in Russian.
-Extract actionable insights relevant to software engineering, AI, automation, developer tools.
-SCORING (immediate_relevance r): 0.8+ = actionable this week. 0.5-0.7 = strategic value.
-<0.3 = generic motivation, off-topic.
+const SYSTEM_PROMPT = `CONTEXT: You extract knowledge for MAOS — a personal AI business brain and multi-agent autonomous development system.
+Owner interests: AI agents, automation, SaaS, TypeScript/Node.js, Supabase, Telegram bots, knowledge pipelines, developer tooling.
+You are analyzing a YouTube video. ALWAYS respond in Russian. All content, summary, and insights must be in Russian.
+QUALITY RULES:
+- Extract ACTIONABLE insights, not summaries. Each insight = concrete technique or tool recommendation.
+- Tags must be specific: "Supabase Edge Functions" not "technology".
+- Entities: proper nouns only — tool names, projects, people. Never generic concepts.
+- If content not relevant to AI/tech/business → all relevance scores < 0.3.
+- Insights must be concrete: BAD "автор обсуждает подходы" → GOOD "pgvector HNSW 10x faster than IVFFlat for <1M rows".
+SCORING (immediate_relevance r): 0.8+ = actionable this week with our stack (Node.js, TypeScript, Supabase, Claude, Vercel, Telegram Bot API). 0.5-0.7 = strategic value. <0.3 = generic motivation, off-topic.
 IDEAS: must start with an action verb (Добавить/Настроить/Мигрировать/Внедрить).
-ENTITIES: proper nouns only — tool names, projects, people. Never generic concepts.
 Return ONLY valid JSON, no markdown.`;
 
 const USER_PROMPT = `Watch this video and extract:

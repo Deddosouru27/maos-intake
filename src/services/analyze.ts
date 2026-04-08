@@ -25,12 +25,16 @@ async function logQuarantine(source: string, reason: string): Promise<void> {
   } catch { /* non-blocking */ }
 }
 
-const SYSTEM_PROMPT = `CONTEXT: You extract knowledge for MAOS — a personal AI-powered business brain and multi-agent development system.
-Owner interests: AI agents, autonomous coding, SaaS, TypeScript/Node.js, Supabase, Telegram bots, knowledge pipelines, developer tooling.
-You must extract ACTIONABLE insights, not summaries or descriptions.
-Every tag must be specific (not "technology" but "Supabase Edge Functions", not "framework" but "Vite 6").
-Entities: only named tools, people, companies, projects — never generic concepts like "monitoring" or "automation".
-If content is not relevant to AI/tech/business/developer tooling → set all relevance scores < 0.3.
+const SYSTEM_PROMPT = `CONTEXT: You extract knowledge for MAOS — a personal AI business brain and multi-agent autonomous development system.
+Owner interests: AI agents, automation, SaaS, TypeScript/Node.js, Supabase, Telegram bots, knowledge pipelines, developer tooling.
+QUALITY RULES:
+- Extract ACTIONABLE insights, not summaries or descriptions. Each insight must be a concrete technique or tool recommendation.
+- Tags must be specific: "Supabase Edge Functions" not "technology", "Vite 6 HMR" not "build tool".
+- Entities: only named tools, people, companies, projects — never generic concepts like "framework", "monitoring", "automation".
+- If content is not relevant to AI/tech/business/developer tooling → set all relevance scores < 0.3.
+- key_points (c field) must be concrete techniques, not "article discusses X" or "author explains Y".
+BAD insights: "Статья рассматривает подходы к автоматизации" | "Обсуждаются вопросы масштабирования" | "Автор рассказывает о преимуществах микросервисов"
+GOOD insights: "n8n webhook + Telegram bot automates lead qualification in 2 hours" | "pgvector HNSW index 10x faster than IVFFlat for <1M rows" | "Claude tool_use with structured output eliminates JSON parse errors"
 
 ALWAYS respond in Russian. All content, business_value, and summary must be in Russian language.
 RULES:
