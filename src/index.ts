@@ -1758,7 +1758,7 @@ app.get('/export-knowledge', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/analyze-trends', async (_req: Request, res: Response) => {
+app.post('/analyze-trends', async (req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
   if (!pitstopUrl || !pitstopKey) {
@@ -1766,20 +1766,24 @@ app.post('/analyze-trends', async (_req: Request, res: Response) => {
     return;
   }
 
+  const days = Math.min(Number(req.body?.days ?? 7), 90);
+  const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+
   try {
     const { createClient: mk } = await import('@supabase/supabase-js');
     const sb = mk(pitstopUrl, pitstopKey);
 
-    // 1) Trending tags — fetch all tags, aggregate in JS (tags is a text[] column)
+    // 1) Trending tags — aggregate from tags[] column within period
     const { data: tagRows, error: tagErr } = await sb
       .from('extracted_knowledge')
-      .select('tags');
+      .select('tags')
+      .gte('created_at', cutoff);
     if (tagErr) throw tagErr;
 
     const tagCounts = new Map<string, number>();
     for (const row of tagRows ?? []) {
       for (const tag of (row.tags as string[]) ?? []) {
-        tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+        if (tag && tag.length >= 2) tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
       }
     }
     const trending_tags = [...tagCounts.entries()]
@@ -1787,29 +1791,69 @@ app.post('/analyze-trends', async (_req: Request, res: Response) => {
       .slice(0, 20)
       .map(([tag, count]) => ({ tag, count }));
 
-    // 2) Hot knowledge — last 7 days, sorted by overall_immediate
-    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    // 2) Hot knowledge — top scoring items in period
     const { data: hotRows, error: hotErr } = await sb
       .from('extracted_knowledge')
-      .select('title, overall_immediate, created_at')
-      .gte('created_at', weekAgo)
-      .order('overall_immediate', { ascending: false })
+      .select('content, immediate_relevance, strategic_relevance, entities, source_url, source_type, created_at')
+      .gte('created_at', cutoff)
+      .order('immediate_relevance', { ascending: false })
       .limit(10);
     if (hotErr) throw hotErr;
 
-    const hot_knowledge = (hotRows ?? []).map((r) => ({
-      title: r.title,
-      overall_immediate: r.overall_immediate,
+    const hot_knowledge = (hotRows ?? []).map((r: { content: string; immediate_relevance: number; strategic_relevance: number; entities: string[] | null; source_url: string; source_type: string; created_at: string }) => ({
+      content: (r.content ?? '').slice(0, 200),
+      immediate_relevance: r.immediate_relevance,
+      strategic_relevance: r.strategic_relevance,
+      entities: r.entities ?? [],
+      source_url: r.source_url,
+      source_type: r.source_type,
       created_at: r.created_at,
     }));
 
-    // 3) Summary
-    const topTag = trending_tags[0];
-    const summary = topTag
-      ? `Top trend: ${topTag.tag} with ${topTag.count} mentions`
-      : 'No tags found';
+    // 3) Source type breakdown
+    const sourceTypeCounts = new Map<string, number>();
+    for (const row of tagRows ?? []) {
+      // tagRows only has tags, need separate query
+    }
+    const { data: sourceRows } = await sb
+      .from('extracted_knowledge')
+      .select('source_type')
+      .gte('created_at', cutoff);
+    for (const row of sourceRows ?? []) {
+      const st = (row.source_type as string) ?? 'unknown';
+      sourceTypeCounts.set(st, (sourceTypeCounts.get(st) ?? 0) + 1);
+    }
+    const source_breakdown = [...sourceTypeCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([source_type, count]) => ({ source_type, count }));
 
-    res.json({ trending_tags, hot_knowledge, summary });
+    // 4) Entity leaderboard from entity_nodes
+    const { data: topEntities } = await sb
+      .from('entity_nodes')
+      .select('name, type, mention_count')
+      .order('mention_count', { ascending: false })
+      .limit(15);
+
+    const entity_leaderboard = (topEntities ?? []).map((e: { name: string; type: string; mention_count: number }) => ({
+      name: e.name,
+      type: e.type,
+      mentions: e.mention_count,
+    }));
+
+    // 5) Period stats
+    const totalInPeriod = (tagRows ?? []).length;
+    const avgScore = hot_knowledge.length > 0
+      ? hot_knowledge.reduce((s, r) => s + r.immediate_relevance, 0) / hot_knowledge.length : 0;
+
+    res.json({
+      period: { days, from: cutoff, to: new Date().toISOString() },
+      total_knowledge: totalInPeriod,
+      avg_top10_score: +avgScore.toFixed(3),
+      trending_tags,
+      hot_knowledge,
+      source_breakdown,
+      entity_leaderboard,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[/analyze-trends] error:', message);
