@@ -1423,6 +1423,65 @@ app.get('/quality-report', async (_req: Request, res: Response) => {
   });
 });
 
+app.post('/analyze-trends', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Supabase not configured' });
+    return;
+  }
+
+  try {
+    const { createClient: mk } = await import('@supabase/supabase-js');
+    const sb = mk(pitstopUrl, pitstopKey);
+
+    // 1) Trending tags — fetch all tags, aggregate in JS (tags is a text[] column)
+    const { data: tagRows, error: tagErr } = await sb
+      .from('extracted_knowledge')
+      .select('tags');
+    if (tagErr) throw tagErr;
+
+    const tagCounts = new Map<string, number>();
+    for (const row of tagRows ?? []) {
+      for (const tag of (row.tags as string[]) ?? []) {
+        tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+      }
+    }
+    const trending_tags = [...tagCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([tag, count]) => ({ tag, count }));
+
+    // 2) Hot knowledge — last 7 days, sorted by overall_immediate
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: hotRows, error: hotErr } = await sb
+      .from('extracted_knowledge')
+      .select('title, overall_immediate, created_at')
+      .gte('created_at', weekAgo)
+      .order('overall_immediate', { ascending: false })
+      .limit(10);
+    if (hotErr) throw hotErr;
+
+    const hot_knowledge = (hotRows ?? []).map((r) => ({
+      title: r.title,
+      overall_immediate: r.overall_immediate,
+      created_at: r.created_at,
+    }));
+
+    // 3) Summary
+    const topTag = trending_tags[0];
+    const summary = topTag
+      ? `Top trend: ${topTag.tag} with ${topTag.count} mentions`
+      : 'No tags found';
+
+    res.json({ trending_tags, hot_knowledge, summary });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[/analyze-trends] error:', message);
+    res.status(500).json({ error: message });
+  }
+});
+
 async function runEntityBackfill(): Promise<{ processed: number; remaining: number }> {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
