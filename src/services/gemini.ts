@@ -251,7 +251,7 @@ export async function callGeminiForText(prompt: string): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 
-  const TEXT_MODEL = 'gemini-2.5-flash';
+  const TEXT_MODEL = 'gemini-2.0-flash'; // 2.5-flash preview unstable for text; 2.0 is stable
   const endpoint = `${API_BASE}/${TEXT_MODEL}:generateContent?key=${apiKey}`;
 
   let response: Response;

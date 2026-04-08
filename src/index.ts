@@ -2866,10 +2866,12 @@ interface IdeaEvaluation {
 }
 
 function extractJSON(text: string): string {
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start !== -1 && end > start) return text.slice(start, end + 1);
-  return text;
+  // Strip markdown code fences first
+  let t = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  const start = t.indexOf('{');
+  const end = t.lastIndexOf('}');
+  if (start !== -1 && end > start) return t.slice(start, end + 1);
+  return t;
 }
 
 async function evaluateIdea(idea: { id: string; content: string; source_type?: string; source_url?: string }): Promise<IdeaEvaluation> {
