@@ -1512,6 +1512,193 @@ app.get('/stats', async (_req: Request, res: Response) => {
   });
 });
 
+/** GET /dashboard — Pitstop Dashboard single-endpoint summary. */
+app.get('/dashboard', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+  const sb = createClient(pitstopUrl, pitstopKey);
+
+  const [
+    { count: knowledge_count },
+    { count: ideas_count },
+    { count: entities_count },
+    { count: pending_discovery },
+    { data: recent_knowledge },
+  ] = await Promise.all([
+    sb.from('extracted_knowledge').select('*', { count: 'exact', head: true }),
+    sb.from('ideas').select('*', { count: 'exact', head: true }),
+    sb.from('entity_nodes').select('*', { count: 'exact', head: true }),
+    sb.from('content_discovery').select('*', { count: 'exact', head: true }).eq('processing_status', 'pending'),
+    sb.from('extracted_knowledge').select('id,title,score,source_url,created_at').order('score', { ascending: false }).limit(5),
+  ]);
+
+  res.json({
+    knowledge_count: knowledge_count ?? 0,
+    ideas_count: ideas_count ?? 0,
+    entities_count: entities_count ?? 0,
+    pending_discovery: pending_discovery ?? 0,
+    recent_knowledge: recent_knowledge ?? [],
+  });
+});
+
+/** POST /process-batch-rss — process pending RSS entries. Body: { limit? } (default 10). */
+app.post('/process-batch-rss', processLimiter, async (req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+  const sb = createClient(pitstopUrl, pitstopKey);
+  const limit = Math.min(Number(req.body?.limit) || 10, 20);
+
+  const { data: pending, error } = await sb
+    .from('content_discovery')
+    .select('id,url,title')
+    .ilike('source', 'rss:%')
+    .eq('processing_status', 'pending')
+    .limit(limit);
+
+  if (error) { res.status(500).json({ error: String(error) }); return; }
+  if (!pending || pending.length === 0) { res.json({ processed: 0, failed: 0, remaining: 0 }); return; }
+
+  let processed = 0;
+  let failed = 0;
+  for (const entry of pending as { id: string; url: string; title: string | null }[]) {
+    try {
+      const source: Source = detectSource(entry.url);
+      const result = await fullPipeline(entry.url, source);
+      const status = ('duplicate' in result || 'youtube_unavailable' in result) ? 'skipped' : 'processed';
+      if (status === 'processed') processed++;
+      await sb.from('content_discovery').update({ processing_status: status }).eq('id', entry.id);
+    } catch (e) {
+      console.error(`[process-batch-rss] failed ${entry.url}:`, e instanceof Error ? e.message : String(e));
+      await sb.from('content_discovery').update({ processing_status: 'failed' }).eq('id', entry.id);
+      failed++;
+    }
+  }
+
+  const { count } = await sb
+    .from('content_discovery')
+    .select('id', { count: 'exact', head: true })
+    .ilike('source', 'rss:%')
+    .eq('processing_status', 'pending');
+
+  res.json({ processed, failed, remaining: count ?? 0 });
+});
+
+/** GET /content-pipeline-status — full pipeline status snapshot. */
+app.get('/content-pipeline-status', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+  const sb = createClient(pitstopUrl, pitstopKey);
+
+  const [
+    { data: ingestedCounts },
+    { data: discoveryCounts },
+    { count: knowledgeTotal, data: knowledgeAvg },
+    { count: entityNodes },
+    { count: entityEdges },
+    { data: feedStats },
+  ] = await Promise.all([
+    sb.from('ingested_content').select('processing_status').then(async (r) => {
+      const rows = (r.data ?? []) as { processing_status: string }[];
+      const counts = { done: 0, processing: 0, failed: 0, quarantined: 0 };
+      for (const row of rows) {
+        const s = row.processing_status as keyof typeof counts;
+        if (s in counts) counts[s]++;
+      }
+      return { data: counts };
+    }),
+    sb.from('content_discovery').select('processing_status').then(async (r) => {
+      const rows = (r.data ?? []) as { processing_status: string }[];
+      const counts = { pending: 0, done: 0, failed: 0 };
+      for (const row of rows) {
+        const s = row.processing_status as keyof typeof counts;
+        if (s in counts) counts[s]++;
+      }
+      return { data: counts };
+    }),
+    sb.from('extracted_knowledge').select('score', { count: 'exact' }),
+    sb.from('entity_nodes').select('*', { count: 'exact', head: true }),
+    sb.from('entity_edges').select('*', { count: 'exact', head: true }),
+    sb.from('rss_feeds').select('last_checked').order('last_checked', { ascending: false }).limit(1),
+  ]);
+
+  const scores = (knowledgeAvg ?? []) as { score: number }[];
+  const avg_score = scores.length > 0
+    ? Math.round((scores.reduce((s, r) => s + (r.score ?? 0), 0) / scores.length) * 100) / 100
+    : 0;
+
+  res.json({
+    ingested_content: ingestedCounts ?? {},
+    content_discovery: discoveryCounts ?? {},
+    extracted_knowledge: { total: knowledgeTotal ?? 0, avg_score },
+    entity_nodes: { total: entityNodes ?? 0 },
+    entity_edges: { total: entityEdges ?? 0 },
+    rss_feeds: { last_check: feedStats?.[0]?.last_checked ?? null },
+  });
+});
+
+/** DELETE /cleanup-stale — mark stuck processing records as failed. */
+app.delete('/cleanup-stale', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+  const sb = createClient(pitstopUrl, pitstopKey);
+
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const { data, error } = await sb
+    .from('ingested_content')
+    .update({ processing_status: 'failed' })
+    .eq('processing_status', 'processing')
+    .lt('updated_at', oneHourAgo)
+    .select('id');
+
+  if (error) { res.status(500).json({ error: String(error) }); return; }
+  res.json({ cleaned: data?.length ?? 0 });
+});
+
+/** POST /reprocess-failed — reprocess failed ingested_content records. */
+app.post('/reprocess-failed', processLimiter, async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+  const sb = createClient(pitstopUrl, pitstopKey);
+
+  const { data: failed, error } = await sb
+    .from('ingested_content')
+    .select('id,source_url')
+    .eq('processing_status', 'failed')
+    .limit(5);
+
+  if (error) { res.status(500).json({ error: String(error) }); return; }
+  if (!failed || failed.length === 0) { res.json({ results: [], total: 0 }); return; }
+
+  const results: { url: string; status: string }[] = [];
+  for (const entry of failed as { id: string; source_url: string }[]) {
+    try {
+      await sb.from('ingested_content').update({ processing_status: 'processing' }).eq('id', entry.id);
+      const source: Source = detectSource(entry.source_url);
+      const result = await fullPipeline(entry.source_url, source);
+      if ('duplicate' in result) {
+        results.push({ url: entry.source_url, status: 'duplicate' });
+        await sb.from('ingested_content').update({ processing_status: 'done' }).eq('id', entry.id);
+      } else if ('youtube_unavailable' in result) {
+        results.push({ url: entry.source_url, status: 'youtube_unavailable' });
+        await sb.from('ingested_content').update({ processing_status: 'failed' }).eq('id', entry.id);
+      } else {
+        results.push({ url: entry.source_url, status: 'success' });
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      results.push({ url: entry.source_url, status: `error: ${msg.slice(0, 100)}` });
+      await sb.from('ingested_content').update({ processing_status: 'failed' }).eq('id', entry.id);
+    }
+  }
+
+  res.json({ results, total: results.length });
+});
+
 interface SummarizeBody {
   text: string;
   maxLength?: number;
