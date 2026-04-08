@@ -278,6 +278,7 @@ function buildNotification(routed: RoutedKnowledgeItem[]): string {
 
 let lastHeartbeatAt: string | null = null;
 
+/** GET /status — lightweight health ping, no DB calls. */
 app.get('/status', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
@@ -287,6 +288,7 @@ app.get('/status', (_req: Request, res: Response) => {
   });
 });
 
+/** GET /health — full health check with Supabase counts. Query: ?preflight=true for Telegram test. 503 if degraded. */
 app.get('/health', async (req: Request, res: Response) => {
   const key = (name: string) => (process.env[name] ? 'connected' : 'missing_key');
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
@@ -798,6 +800,7 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
   }
 }
 
+/** POST /process — main ingestion endpoint. URL or text paste. Pipeline: detect→fetch→dedup→Haiku→route→save. 10 req/min. */
 app.post('/process', processLimiter, async (req: Request, res: Response) => {
   const { url, source: providedSource, text: bodyText, title: bodyTitle, source_type: bodySourceType } = req.body as ProcessBody;
 
@@ -925,6 +928,7 @@ interface ProcessFileBody {
   mime_type: string;
 }
 
+/** POST /process-file — file upload ingestion (pdf/docx/xlsx). Body: { buffer (base64), filename, mime_type }. 10 req/min. */
 app.post('/process-file', processLimiter, async (req: Request, res: Response) => {
   const { buffer, filename, mime_type } = req.body as ProcessFileBody;
 
@@ -960,6 +964,7 @@ interface BatchBody {
   title?: string;
 }
 
+/** POST /batch — legacy batch endpoint (DEPRECATED, use POST /process/batch). */
 app.post('/batch', processLimiter, async (req: Request, res: Response) => {
   const { urls, texts: bodyTexts, text: bodyText, source_type: bodySourceType, title: bodyTitle } = req.body as BatchBody;
 
@@ -1126,6 +1131,7 @@ async function writeBatchSummary(
   }
 }
 
+/** POST /process/batch — parallel batch processing with retry. Up to 10 URLs. 10 req/min. */
 app.post('/process/batch', processLimiter, async (req: Request, res: Response) => {
   const { urls, source_type: bodySourceType } = req.body as { urls?: unknown; source_type?: string };
 
@@ -1172,6 +1178,7 @@ app.post('/process/batch', processLimiter, async (req: Request, res: Response) =
   res.json({ success: true, results, summary: { success: successCount, skipped: skippedCount, errors: errorCount } });
 });
 
+/** GET /api/rejected — list URLs rejected by pre-filter (too short, wrong language). Last 50 items. */
 app.get('/api/rejected', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
@@ -1201,6 +1208,7 @@ app.get('/api/rejected', async (_req: Request, res: Response) => {
   });
 });
 
+/** GET /stats — processing statistics: today count, totals, uptime. */
 app.get('/stats', async (_req: Request, res: Response) => {
   const { createClient } = await import('@supabase/supabase-js');
 
@@ -1261,6 +1269,7 @@ interface SummarizeBody {
   maxLength?: number;
 }
 
+/** POST /summarize — summarize text without saving to DB. Uses Haiku. Body: { text, maxLength? }. */
 app.post('/summarize', async (req: Request, res: Response) => {
   const { text, maxLength } = req.body as SummarizeBody;
 
@@ -1306,6 +1315,7 @@ app.post('/summarize', async (req: Request, res: Response) => {
   }
 });
 
+/** POST /backfill-embeddings — generate missing OpenAI embeddings (512 dim). 10 rows per call. */
 app.post('/backfill-embeddings', async (_req: Request, res: Response) => {
   const { createClient } = await import('@supabase/supabase-js');
   const OpenAI = (await import('openai')).default;
@@ -1368,6 +1378,7 @@ app.post('/backfill-embeddings', async (_req: Request, res: Response) => {
   res.json({ processed, remaining: remaining ?? 0 });
 });
 
+/** GET /quality-report — scoring distribution audit. Random sample + aggregate stats. */
 app.get('/quality-report', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
@@ -1550,6 +1561,7 @@ async function runEntityBackfill(): Promise<{ processed: number; remaining: numb
   return { processed, remaining: remaining ?? 0 };
 }
 
+/** POST /backfill-entities — extract entity graph from knowledge via Haiku. 10 rows per call. */
 app.post('/backfill-entities', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
@@ -1562,11 +1574,7 @@ app.post('/backfill-entities', async (_req: Request, res: Response) => {
   res.json(result);
 });
 
-/**
- * POST /backfill-edge-types — replace co_occurs edges with inferred relationship types.
- * Rules: tool+tool→competes_with, person+tool→uses, tool+concept→implements, etc.
- * Returns: { updated, total_co_occurs }.
- */
+/** POST /backfill-edge-types — replace co_occurs edges with inferred relationship types. */
 app.post('/backfill-edge-types', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
@@ -1639,12 +1647,7 @@ app.post('/backfill-edge-types', async (_req: Request, res: Response) => {
   res.json({ updated, total_co_occurs: edges.length });
 });
 
-/**
- * POST /label-clusters — auto-label knowledge clusters via keyword extraction.
- * Zero LLM cost: uses TF-IDF-like word frequency on cluster content.
- * Upserts labels to knowledge_clusters table.
- * Returns: { labeled, clusters[] }.
- */
+/** POST /label-clusters — auto-label knowledge clusters via keyword frequency. Zero LLM cost. */
 app.post('/label-clusters', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
@@ -1797,6 +1800,7 @@ async function runAutoDiscover(topics: string[], supabase: any): Promise<Record<
 
 interface AutoDiscoverBody { topics: string[] }
 
+/** POST /auto-discover — discover new content by topics via YouTube search. Body: { topics[] }. Max 10. */
 app.post('/auto-discover', async (req: Request, res: Response) => {
   const { topics } = req.body as AutoDiscoverBody;
   if (!Array.isArray(topics) || topics.length === 0) {
@@ -1816,7 +1820,7 @@ app.post('/auto-discover', async (req: Request, res: Response) => {
   res.json({ discovered: total, by_topic: counts });
 });
 
-// Process pending items from content_discovery → fullPipeline each → update status
+/** POST /process-discovery — process pending content_discovery items. Body: { limit? }. 10 req/min. */
 app.post('/process-discovery', processLimiter, async (req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
@@ -1894,6 +1898,7 @@ app.post('/process-discovery', processLimiter, async (req: Request, res: Respons
   res.json({ processed, failed, remaining: remaining ?? 0, details });
 });
 
+/** POST /triage — per-idea Haiku triage with calibration few-shots. Body: { limit? }. */
 app.post('/triage', async (req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
@@ -2029,6 +2034,7 @@ Triage опирается на цели, потребности, задачи и
   });
 });
 
+/** POST /auto-triage — batch triage all new ideas via Haiku LLM. Batches of 20. Can create tasks. */
 app.post('/auto-triage', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
@@ -2158,7 +2164,7 @@ app.post('/auto-triage', async (_req: Request, res: Response) => {
 });
 
 // T517: Bulk triage — keyword heuristics, no LLM cost
-// Scores relevance/effort/impact, classifies top→approved, bottom→rejected, rest→review
+/** POST /triage-all — bulk keyword triage, zero LLM cost. Top 15% approved, bottom 35% rejected. */
 app.post('/triage-all', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
@@ -2303,6 +2309,7 @@ app.post('/triage-all', async (_req: Request, res: Response) => {
   });
 });
 
+/** GET /heartbeat — cron heartbeat: quality check, entity backfill, daily auto-discover, Telegram report. */
 app.get('/heartbeat', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
   const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
