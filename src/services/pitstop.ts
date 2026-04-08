@@ -515,6 +515,71 @@ export async function upsertEntityGraph(
   console.log(`[entity_graph] upserted ${toInsert.length} new nodes, updated ${toUpdate.length}, ${edgeRows.length} edges`);
 }
 
+// T516: Auto-generate actionable ideas from high-score knowledge items
+// Runs after saveExtractedKnowledge — creates ideas with source='auto' and knowledge_id linkage
+function generateIdeaText(content: string): string {
+  // Strip leading [GUIDE] prefix if present
+  const clean = content.replace(/^\[GUIDE\]\s*/, '').trim();
+  // Extract first sentence as key insight
+  const firstSentence = clean.split(/[.!?]\s/)[0] ?? clean;
+  const truncated = firstSentence.length > 200 ? firstSentence.slice(0, 200) + '…' : firstSentence;
+  // Ensure actionable verb prefix (per CLAUDE.md: Добавить/Настроить/Мигрировать/Внедрить)
+  const verbPrefixes = ['добавить', 'настроить', 'мигрировать', 'внедрить', 'implement', 'add', 'configure', 'integrate'];
+  const startsWithVerb = verbPrefixes.some(v => truncated.toLowerCase().startsWith(v));
+  if (startsWithVerb) return truncated;
+  return `Внедрить: ${truncated}`;
+}
+
+export async function generateAutoIdeas(
+  savedKnowledge: { id: string; content: string }[],
+  allItems: { content: string; immediate_relevance: number; knowledge_type: string; tags: string[]; entity_objects?: { name: string; type: string }[] }[],
+  sourceUrl: string,
+  sourceType: string,
+): Promise<number> {
+  if (savedKnowledge.length === 0) return 0;
+
+  let supabase;
+  try {
+    supabase = getClient();
+  } catch (err) {
+    console.error('[auto-ideas] client init failed:', err);
+    return 0;
+  }
+
+  // Build content→item map for score lookup
+  const itemMap = new Map(allItems.map(i => [i.content, i]));
+
+  const rows: Record<string, unknown>[] = [];
+  for (const saved of savedKnowledge) {
+    const item = itemMap.get(saved.content);
+    if (!item || item.immediate_relevance < 0.7) continue;
+
+    rows.push({
+      content: generateIdeaText(saved.content),
+      summary: saved.content.slice(0, 80),
+      ai_category: item.knowledge_type,
+      source_type: sourceType,
+      source_url: sourceUrl,
+      source: 'auto',
+      relevance: 'hot',
+      status: 'new',
+      knowledge_id: saved.id,
+      project_id: null,
+    });
+  }
+
+  if (rows.length === 0) return 0;
+
+  const { error } = await supabase.from('ideas').insert(rows);
+  if (error) {
+    console.error('[auto-ideas] INSERT failed:', error.message);
+    return 0;
+  }
+
+  console.log(`[auto-ideas] generated ${rows.length} ideas from high-score knowledge`);
+  return rows.length;
+}
+
 export async function saveToPitstop(
   analysis: BrainAnalysis,
   hotItems: KnowledgeItem[],

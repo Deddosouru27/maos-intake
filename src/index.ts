@@ -6,7 +6,7 @@ import { createClient } from '@supabase/supabase-js';
 import { extractFileText, detectFileSource, FileSourceType } from './handlers/file';
 import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent, analyzeWithChunking } from './services/analyze';
-import { checkSourceUrlDedup, checkContentHashDedup, insertIngestedPending, updateIngestedDone, quarantineIngestedItem, saveExtractedKnowledge, saveToPitstop, upsertEntityGraph } from './services/pitstop';
+import { checkSourceUrlDedup, checkContentHashDedup, insertIngestedPending, updateIngestedDone, quarantineIngestedItem, saveExtractedKnowledge, generateAutoIdeas, saveToPitstop, upsertEntityGraph } from './services/pitstop';
 import { rerankItems } from './services/rerank';
 import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
@@ -546,6 +546,15 @@ async function runPipeline(
     console.log('[PIPELINE] extracted_knowledge ok:', knowledgeSaved.length, 'saved,', dedupSkipped, 'dedup skipped,', smartCrudUpdates, 'updated');
   } catch (e) {
     console.error('[PIPELINE] extracted_knowledge failed:', e instanceof Error ? e.message : String(e));
+  }
+
+  // T516: Auto-generate ideas from high-score knowledge (source='auto', knowledge_id linked)
+  let autoIdeasCount = 0;
+  try {
+    autoIdeasCount = await generateAutoIdeas(knowledgeSaved, itemsToSave, sourceUrl, sourceType);
+    if (autoIdeasCount > 0) console.log(`[PIPELINE] auto-ideas: ${autoIdeasCount} generated`);
+  } catch (e) {
+    console.error('[PIPELINE] auto-ideas failed (non-fatal):', e instanceof Error ? e.message : String(e));
   }
 
   console.log('[PIPELINE] saving ideas...');
