@@ -1595,7 +1595,8 @@ app.get('/content-pipeline-status', async (_req: Request, res: Response) => {
   const [
     { data: ingestedCounts },
     { data: discoveryCounts },
-    { count: knowledgeTotal, data: knowledgeAvg },
+    { count: knowledgeTotal },
+    { data: knowledgeScores },
     { count: entityNodes },
     { count: entityEdges },
     { data: feedStats },
@@ -1618,13 +1619,14 @@ app.get('/content-pipeline-status', async (_req: Request, res: Response) => {
       }
       return { data: counts };
     }),
-    sb.from('extracted_knowledge').select('score', { count: 'exact' }),
+    sb.from('extracted_knowledge').select('*', { count: 'exact', head: true }),
+    sb.from('extracted_knowledge').select('score').not('score', 'is', null).limit(500),
     sb.from('entity_nodes').select('*', { count: 'exact', head: true }),
     sb.from('entity_edges').select('*', { count: 'exact', head: true }),
     sb.from('rss_feeds').select('last_checked').order('last_checked', { ascending: false }).limit(1),
   ]);
 
-  const scores = (knowledgeAvg ?? []) as { score: number }[];
+  const scores = (knowledgeScores ?? []) as { score: number }[];
   const avg_score = scores.length > 0
     ? Math.round((scores.reduce((s, r) => s + (r.score ?? 0), 0) / scores.length) * 100) / 100
     : 0;
@@ -1654,7 +1656,7 @@ app.delete('/cleanup-stale', async (_req: Request, res: Response) => {
     .lt('updated_at', oneHourAgo)
     .select('id');
 
-  if (error) { res.status(500).json({ error: String(error) }); return; }
+  if (error) { res.status(500).json({ error: (error as { message?: string }).message ?? JSON.stringify(error) }); return; }
   res.json({ cleaned: data?.length ?? 0 });
 });
 
