@@ -769,6 +769,12 @@ async function fullPipeline(url: string, source: Source): Promise<{ notification
         const geminiErrMsg = geminiErr instanceof Error ? geminiErr.message : String(geminiErr);
         console.warn('[PIPELINE] Gemini failed:', geminiErrMsg);
         const failedAnalysis: BrainAnalysis = { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: '', category: 'failed', language: 'other' };
+        // 429 quota — do NOT try transcript/Haiku fallback, just queue for later
+        if (geminiErrMsg.startsWith('GEMINI_QUOTA_EXCEEDED')) {
+          if (ingestedId) await updateIngestedDone(ingestedId, failedAnalysis, 'failed', 0, false, 'gemini_quota');
+          const queued = await queueYouTubeForRunner(url, 'gemini_quota');
+          return { youtube_unavailable: true, _gemini_error: geminiErrMsg.slice(0, 300), _queued: queued };
+        }
         // Secondary fallback: try transcript
         if (rawText.length < 30) {
           console.log('[PIPELINE] Gemini failed + no rawText — trying transcript fetch');

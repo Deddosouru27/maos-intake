@@ -1,42 +1,35 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel, EntityObject } from '../types';
+import { BrainAnalysis, KnowledgeItem, KnowledgeType, EntityObject, EffortLevel } from '../types';
 
-// API Cost Protection: max 1 retry. See incident 29.03.
-// Gemini free tier — no retry needed; on fail caller falls back to Haiku pipeline.
-// SDK v0.24.1 uses v1beta API. Confirmed working model names for v1beta:
-// gemini-2.0-flash, gemini-1.5-flash-latest, gemini-1.5-flash-002
-const MODEL_ID = 'gemini-2.0-flash';
+// gemini-2.5-flash via REST v1beta — free tier: 250 videos/day, 10 RPM.
+// SDK dropped: direct REST gives full control over model name and error codes.
+const MODEL_ID = 'gemini-2.5-flash';
+const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
-const SYSTEM_PROMPT = `CONTEXT: You extract knowledge for MAOS — a personal AI business brain and multi-agent autonomous development system.
-Owner interests: AI agents, automation, SaaS, TypeScript/Node.js, Supabase, Telegram bots, knowledge pipelines, developer tooling.
-You are analyzing a YouTube video. ALWAYS respond in Russian. All content, summary, and insights must be in Russian.
-QUALITY RULES:
-- Extract ACTIONABLE insights, not summaries. Each insight = concrete technique or tool recommendation.
-- Tags must be specific: "Supabase Edge Functions" not "technology".
-- Entities: proper nouns only — tool names, projects, people. Never generic concepts.
-- If content not relevant to AI/tech/business → all relevance scores < 0.3.
-- Insights must be concrete: BAD "автор обсуждает подходы" → GOOD "pgvector HNSW 10x faster than IVFFlat for <1M rows".
-SCORING (immediate_relevance r): 0.8+ = actionable this week with our stack (Node.js, TypeScript, Supabase, Claude, Vercel, Telegram Bot API). 0.5-0.7 = strategic value. <0.3 = generic motivation, off-topic.
-IDEAS: must start with an action verb (Добавить/Настроить/Мигрировать/Внедрить).
-Return ONLY valid JSON, no markdown.`;
+const SYSTEM_PROMPT = `You are MAOS knowledge extraction engine.
+Analyze this YouTube video.
+Owner interests: AI agents, automation, SaaS, TypeScript, Supabase, Node.js, Claude/LLMs, Vercel, Telegram bots.
+If NOT relevant → return {"relevant": false, "reason": "one sentence why"}
 
-const USER_PROMPT = `Watch this video and extract:
+Return ONLY valid JSON, no markdown:
 {
-  "summary": "2-3 sentence summary in Russian",
-  "items": [
-    {
-      "t": "insight|pattern|tool|lesson|idea|technique",
-      "c": "Content in Russian. Max 2 sentences.",
-      "b": "Business value in Russian. 1 sentence.",
-      "s": 0.6,
-      "r": 0.7,
-      "e": ["EntityName"],
-      "eo": [{"n": "EntityName", "t": "tool|project|concept|person"}]
-    }
-  ],
-  "entities": ["Supabase", "Claude"]
+  "relevant": true,
+  "full_transcript": "500+ word detailed summary of everything said in the video",
+  "summary": "One specific sentence about the core value",
+  "key_insights": ["Concrete technique or finding — max 6"],
+  "entities": [{"name": "ToolName", "type": "tool|project|person|concept"}],
+  "actionable_ideas": ["Implement: specific action with specific tool — max 4"],
+  "tags": ["specific-tag"],
+  "relevance_score": 0.8
 }
-Extract MAX 8 most important insights. Focus on actionable knowledge.`;
+
+QUALITY RULES:
+- BAD: "Видео рассматривает подходы к автоматизации"
+- GOOD: "pgvector HNSW index 10x faster than IVFFlat for vectors under 1M"
+- Tags: specific — "Supabase Edge Functions" not "technology"
+- Entities: proper nouns only — tools, projects, people. NEVER: "AI", "фреймворк", "мониторинг"
+- Ideas must start with verb: Добавить/Настроить/Мигрировать/Внедрить
+- SCORING: 0.8+ = actionable this week with Node.js/TS/Supabase/Claude/Vercel stack. 0.5–0.7 = strategic. <0.3 = generic/off-topic
+- All text content in Russian.`;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function parseGeminiJSON(raw: string): any {
@@ -56,53 +49,77 @@ function parseGeminiJSON(raw: string): any {
 }
 
 function buildBrainAnalysis(parsed: ReturnType<typeof parseGeminiJSON>): BrainAnalysis {
-  const validKnowledgeTypes = new Set<KnowledgeType>([
-    'actionable_idea', 'tool_or_library', 'architecture_pattern',
-    'insight', 'technique', 'lesson_learned',
-  ]);
-  const typeMap: Record<string, KnowledgeType> = {
-    idea: 'actionable_idea', tool: 'tool_or_library', pattern: 'architecture_pattern',
-    lesson: 'lesson_learned', insight: 'insight', technique: 'technique',
-  };
-
-  const knowledge_items: KnowledgeItem[] = (parsed.items ?? []).map((item: { t: string; c: string; b: string; s: number; r: number; e?: string[]; eo?: {n: string; t: string}[] }) => {
-    const kt: KnowledgeType = typeMap[item.t] ?? 'insight';
-    if (!validKnowledgeTypes.has(kt)) { /* safe — default is 'insight' */ }
+  // Not relevant — return empty analysis so pipeline discards it
+  if (!parsed.relevant) {
     return {
-      knowledge_type: kt,
-      content: item.c ?? '',
-      business_value: item.b ?? null,
-      strategic_relevance: typeof item.s === 'number' ? item.s : 0,
-      immediate_relevance: typeof item.r === 'number' ? item.r : 0,
-      project: null,
-      domains: [],
-      solves_need: null,
-      novelty: 0.5,
-      effort: 'medium' as EffortLevel,
-      has_ready_code: false,
-      tags: item.e ?? [],
-      entity_objects: (item.eo ?? []).map((o: {n: string; t: string}): EntityObject => ({
-        name: o.n,
-        type: (['tool', 'project', 'concept', 'person'].includes(o.t) ? o.t : 'concept') as EntityObject['type'],
-      })),
+      summary: parsed.reason ?? 'Not relevant to MAOS stack',
+      knowledge_items: [],
+      overall_immediate: 0,
+      overall_strategic: 0,
+      priority_signal: false,
+      priority_reason: '',
+      category: 'not_relevant',
+      language: 'ru',
     };
-  });
+  }
 
-  const overall_immediate = knowledge_items.length > 0
-    ? knowledge_items.reduce((s, i) => s + i.immediate_relevance, 0) / knowledge_items.length : 0;
-  const overall_strategic = knowledge_items.length > 0
-    ? knowledge_items.reduce((s, i) => s + i.strategic_relevance, 0) / knowledge_items.length : 0;
+  const score: number = typeof parsed.relevance_score === 'number' ? parsed.relevance_score : 0.5;
+  const tags: string[] = Array.isArray(parsed.tags) ? parsed.tags : [];
+  const entityObjects: EntityObject[] = (parsed.entities ?? []).map(
+    (e: { name: string; type: string }): EntityObject => ({
+      name: e.name,
+      type: (['tool', 'project', 'concept', 'person'].includes(e.type)
+        ? e.type
+        : 'concept') as EntityObject['type'],
+    }),
+  );
+
+  const insights: KnowledgeItem[] = (parsed.key_insights ?? []).map((c: string): KnowledgeItem => ({
+    knowledge_type: 'insight' as KnowledgeType,
+    content: c,
+    business_value: null,
+    strategic_relevance: score * 0.85,
+    immediate_relevance: score,
+    project: null,
+    domains: tags,
+    solves_need: null,
+    novelty: 0.6,
+    effort: 'medium' as EffortLevel,
+    has_ready_code: false,
+    tags,
+    entity_objects: entityObjects,
+  }));
+
+  const ideas: KnowledgeItem[] = (parsed.actionable_ideas ?? []).map((c: string): KnowledgeItem => ({
+    knowledge_type: 'actionable_idea' as KnowledgeType,
+    content: c,
+    business_value: null,
+    strategic_relevance: score,
+    immediate_relevance: score,
+    project: null,
+    domains: tags,
+    solves_need: null,
+    novelty: 0.6,
+    effort: 'medium' as EffortLevel,
+    has_ready_code: false,
+    tags,
+    entity_objects: [],
+  }));
+
+  const knowledge_items = [...insights, ...ideas];
 
   return {
     summary: parsed.summary ?? '',
     knowledge_items,
-    overall_immediate,
-    overall_strategic,
-    priority_signal: knowledge_items.some((i) => i.immediate_relevance >= 0.8),
+    overall_immediate: score,
+    overall_strategic: score * 0.85,
+    priority_signal: score >= 0.8,
     priority_reason: '',
-    category: 'other',
+    category: 'video',
     language: 'ru',
-    entities: parsed.entities ?? [],
+    entities: (parsed.entities ?? []).map((e: { name: string }) => e.name),
+    // Store full_transcript in _haiku_raw so it gets saved to ingested_content.haiku_raw_response
+    _haiku_raw: parsed.full_transcript ?? undefined,
   };
 }
 
@@ -110,24 +127,53 @@ export async function analyzeYouTubeWithGemini(url: string): Promise<BrainAnalys
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: MODEL_ID, systemInstruction: SYSTEM_PROMPT });
-
+  const endpoint = `${API_BASE}/${MODEL_ID}:generateContent?key=${apiKey}`;
   console.log('[GEMINI] Analyzing YouTube URL:', url);
 
-  // Gemini 1.5+ processes YouTube URLs natively via fileData.
-  // Google's servers fetch the video — Vercel egress restrictions don't apply here.
-  const result = await model.generateContent([
-    {
-      fileData: {
-        mimeType: 'video/mp4',
-        fileUri: url,
-      },
+  const body = {
+    system_instruction: {
+      parts: [{ text: SYSTEM_PROMPT }],
     },
-    { text: USER_PROMPT },
-  ]);
+    contents: [
+      {
+        parts: [
+          { text: 'Analyze this YouTube video and extract knowledge for MAOS.' },
+          { fileData: { mimeType: 'video/*', fileUri: url } },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.2,
+      maxOutputTokens: 2048,
+    },
+  };
 
-  const raw = result.response.text();
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    throw new Error(`Gemini network error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // 429 — quota exceeded, do NOT retry. Caller will mark as failed with reason='gemini_quota'.
+  if (response.status === 429) {
+    console.error('[GEMINI] 429 quota exceeded for:', url);
+    throw new Error('GEMINI_QUOTA_EXCEEDED: free tier rate limit hit, retry later');
+  }
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new Error(`Gemini API ${response.status}: ${errText.slice(0, 200)}`);
+  }
+
+  const json = await response.json() as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+  };
+  const raw = json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
   console.log('[GEMINI] Raw response first 200 chars:', raw.slice(0, 200));
 
   if (!raw || raw.trim().length < 20) {
@@ -135,12 +181,12 @@ export async function analyzeYouTubeWithGemini(url: string): Promise<BrainAnalys
   }
 
   const parsed = parseGeminiJSON(raw);
-  if (!parsed || !Array.isArray(parsed.items)) {
+  if (!parsed) {
     console.error('[GEMINI] JSON parse failed, raw (first 300):', raw.slice(0, 300));
     throw new Error('Gemini returned invalid JSON');
   }
 
   const analysis = buildBrainAnalysis(parsed);
-  console.log(`[GEMINI] Extracted ${analysis.knowledge_items.length} items, immediate: ${analysis.overall_immediate.toFixed(2)}`);
+  console.log(`[GEMINI] Extracted ${analysis.knowledge_items.length} items, score: ${analysis.overall_immediate.toFixed(2)}, relevant: ${parsed.relevant}`);
   return analysis;
 }
