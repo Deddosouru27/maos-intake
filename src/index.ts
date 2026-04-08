@@ -1898,6 +1898,159 @@ app.post('/process-discovery', processLimiter, async (req: Request, res: Respons
   res.json({ processed, failed, remaining: remaining ?? 0, details });
 });
 
+// Smart Content Recommender — finds new content to read/watch based on knowledge graph
+app.post('/recommend', async (req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const maxTopics = Math.min(Number(req.body?.max_topics ?? 5), 10);
+  const perTopic = Math.min(Number(req.body?.per_topic ?? 5), 10);
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  // 1. Top topics from entity_nodes (most mentioned tools/concepts)
+  const { data: topEntities, error: entErr } = await sb
+    .from('entity_nodes')
+    .select('name, type, mention_count')
+    .in('type', ['tool', 'project', 'concept'])
+    .order('mention_count', { ascending: false })
+    .limit(maxTopics * 2); // fetch extra to filter generics
+
+  if (entErr || !topEntities || topEntities.length === 0) {
+    res.json({ topics: [], recommendations: [], error: entErr?.message ?? 'no entities found' });
+    return;
+  }
+
+  // Filter out single-char and overly generic entities
+  const GENERIC = new Set(['ai', 'api', 'ui', 'ux', 'css', 'html', 'sql', 'http', 'json', 'cli', 'sdk', 'ide']);
+  const topics = (topEntities as { name: string; type: string; mention_count: number }[])
+    .filter(e => e.name.length >= 2 && !GENERIC.has(e.name.toLowerCase()))
+    .slice(0, maxTopics)
+    .map(e => e.name);
+
+  console.log(`[recommend] top topics: ${topics.join(', ')}`);
+
+  // 2. Already processed URLs
+  const { data: doneRows } = await sb
+    .from('ingested_content')
+    .select('source_url')
+    .eq('processing_status', 'done');
+  const processedUrls = new Set((doneRows ?? []).map((r: { source_url: string }) => r.source_url).filter(Boolean));
+
+  // Also exclude existing content_discovery URLs
+  const { data: discoveryRows } = await sb
+    .from('content_discovery')
+    .select('url');
+  const discoveryUrls = new Set((discoveryRows ?? []).map((r: { url: string }) => r.url).filter(Boolean));
+
+  const allKnown = new Set([...processedUrls, ...discoveryUrls]);
+
+  // 3. Search for content per topic using quality sources via Jina Reader
+  // Multi-source search: YouTube for videos, Habr/dev.to for articles
+  const SEARCH_TEMPLATES = [
+    { source: 'youtube', buildUrl: (topic: string) => `https://www.youtube.com/results?search_query=${encodeURIComponent(topic + ' 2025 tutorial')}&sp=CAI` },
+    { source: 'habr', buildUrl: (topic: string) => `https://habr.com/ru/search/?q=${encodeURIComponent(topic)}&target_type=posts&order=date` },
+    { source: 'dev.to', buildUrl: (topic: string) => `https://dev.to/search?q=${encodeURIComponent(topic)}` },
+  ];
+
+  type Recommendation = { url: string; title: string; topic: string; source: string; reason: string };
+  const recommendations: Recommendation[] = [];
+  const topicStats: Record<string, number> = {};
+
+  for (const topic of topics) {
+    let foundForTopic = 0;
+
+    for (const tmpl of SEARCH_TEMPLATES) {
+      if (foundForTopic >= perTopic) break;
+
+      try {
+        const searchUrl = tmpl.buildUrl(topic);
+        const jinaResp = await fetch('https://r.jina.ai/' + searchUrl, {
+          headers: { Accept: 'text/plain' },
+          signal: AbortSignal.timeout(12000),
+        });
+        if (!jinaResp.ok) continue;
+        const text = await jinaResp.text();
+
+        // Extract links: [Title](URL) pattern from Jina output
+        const linkRegex = /\[([^\]]{5,})\]\((https?:\/\/[^)]+)\)/g;
+        let match: RegExpExecArray | null;
+        while ((match = linkRegex.exec(text)) !== null && foundForTopic < perTopic) {
+          const title = match[1].trim();
+          const url = match[2].trim();
+
+          // Skip known URLs, non-content links, and navigation links
+          if (allKnown.has(url)) continue;
+          if (url.includes('/login') || url.includes('/signup') || url.includes('/settings')) continue;
+          if (url.includes('/tag/') || url.includes('/search') || url.includes('?page=')) continue;
+          if (title.length < 10 || title.length > 300) continue;
+
+          // For YouTube: only video pages
+          if (tmpl.source === 'youtube' && !url.includes('watch?v=')) continue;
+          // For Habr: only article pages
+          if (tmpl.source === 'habr' && !url.match(/habr\.com\/ru\/(articles|post)\/\d+/)) continue;
+          // For dev.to: only article pages
+          if (tmpl.source === 'dev.to' && !url.match(/dev\.to\/[^/]+\/[^/]+/)) continue;
+
+          allKnown.add(url); // prevent cross-topic duplicates
+          recommendations.push({
+            url,
+            title: title.slice(0, 200),
+            topic,
+            source: tmpl.source,
+            reason: `Top entity "${topic}" (${tmpl.source} search)`,
+          });
+          foundForTopic++;
+        }
+      } catch (e) {
+        console.warn(`[recommend] search failed for "${topic}" on ${tmpl.source}:`, e instanceof Error ? e.message : String(e));
+      }
+    }
+
+    topicStats[topic] = foundForTopic;
+  }
+
+  // 5. Save to content_discovery
+  if (recommendations.length > 0) {
+    const discoveryRows = recommendations.map(r => ({
+      url: r.url,
+      title: r.title,
+      source: r.source,
+      topic: r.topic,
+      status: 'pending',
+      discovered_by: 'auto_recommend',
+    }));
+
+    const { error: insertErr } = await sb.from('content_discovery').insert(discoveryRows);
+    if (insertErr) {
+      console.error('[recommend] content_discovery insert failed:', insertErr.message);
+    }
+  }
+
+  // Log action
+  try {
+    await sb.from('agent_action_log').insert({
+      agent: 'intaker', action: 'recommend', status: 'done',
+      details: { topics, total: recommendations.length, by_topic: topicStats },
+      repo: 'maos-intake',
+    });
+  } catch { /* non-fatal */ }
+
+  console.log(`[recommend] ${recommendations.length} recommendations across ${topics.length} topics`);
+  res.json({
+    topics,
+    recommendations,
+    by_topic: topicStats,
+    total: recommendations.length,
+    saved_to_discovery: recommendations.length,
+  });
+});
+
 /** POST /triage — per-idea Haiku triage with calibration few-shots. Body: { limit? }. */
 app.post('/triage', async (req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
