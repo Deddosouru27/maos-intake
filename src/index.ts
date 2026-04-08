@@ -1267,6 +1267,165 @@ app.post('/import-urls', importLimiter, async (req: Request, res: Response) => {
   res.json({ processed: done, failed, duplicates, total: urls.length, results });
 });
 
+// Universal ingest endpoint — accepts pre-extracted data from Runner/external sources
+app.post('/ingest-result', async (req: Request, res: Response) => {
+  const { source_url, source_type, extraction } = req.body as {
+    source_url?: string;
+    source_type?: string;
+    extraction?: {
+      summary?: string;
+      key_insights?: string[];
+      entities?: { name: string; type?: string }[];
+      actionable_ideas?: string[];
+      tags?: string[];
+      relevance_score?: number;
+    };
+  };
+
+  if (!source_url || !extraction) {
+    res.status(400).json({ error: 'source_url and extraction required' });
+    return;
+  }
+
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) {
+    res.status(500).json({ error: 'Missing env vars' });
+    return;
+  }
+
+  const score = typeof extraction.relevance_score === 'number'
+    ? Math.max(0, Math.min(1, extraction.relevance_score)) : 0.5;
+  const srcType = source_type ?? 'external';
+  const tags = extraction.tags ?? [];
+  const entityObjects = (extraction.entities ?? []).map(e => ({
+    name: e.name,
+    type: (['tool', 'project', 'concept', 'person'].includes(e.type ?? '') ? e.type! : 'concept') as import('./types').EntityType,
+  }));
+
+  // Build knowledge items from extraction
+  const insights = extraction.key_insights ?? [];
+  const summary = extraction.summary ?? insights.join('. ');
+  const items: RoutedKnowledgeItem[] = [];
+
+  // Main summary item
+  if (summary.length > 10) {
+    items.push({
+      content: summary.slice(0, 2000),
+      knowledge_type: 'insight',
+      project: null,
+      domains: [],
+      solves_need: null,
+      immediate_relevance: score,
+      strategic_relevance: score * 0.9,
+      novelty: 0.5,
+      effort: 'medium',
+      has_ready_code: false,
+      business_value: null,
+      tags,
+      entity_objects: entityObjects,
+      routed_to: score >= 0.7 ? 'hot_backlog' : score >= 0.5 ? 'knowledge_base' : 'discarded',
+    });
+  }
+
+  // Individual insights as separate items
+  for (const insight of insights.slice(0, 8)) {
+    if (insight.length < 10) continue;
+    items.push({
+      content: insight.slice(0, 2000),
+      knowledge_type: 'insight',
+      project: null,
+      domains: [],
+      solves_need: null,
+      immediate_relevance: score,
+      strategic_relevance: score * 0.9,
+      novelty: 0.5,
+      effort: 'medium',
+      has_ready_code: false,
+      business_value: null,
+      tags,
+      entity_objects: entityObjects,
+      routed_to: score >= 0.7 ? 'hot_backlog' : score >= 0.5 ? 'knowledge_base' : 'discarded',
+    });
+  }
+
+  // 1. Save to extracted_knowledge (dedup + embedding + CRUD)
+  let knowledgeSaved: { id: string; content: string }[] = [];
+  try {
+    const result = await saveExtractedKnowledge(items, null, source_url, srcType);
+    knowledgeSaved = result.saved;
+    console.log(`[ingest-result] knowledge: ${result.saved.length} saved, ${result.dedupSkipped} dedup`);
+  } catch (e) {
+    console.error('[ingest-result] saveExtractedKnowledge failed:', e instanceof Error ? e.message : String(e));
+  }
+
+  // 2. Entity graph
+  let entitiesCount = 0;
+  try {
+    if (entityObjects.length > 0) {
+      await upsertEntityGraph(entityObjects);
+      entitiesCount = entityObjects.length;
+    }
+  } catch (e) {
+    console.error('[ingest-result] entity graph failed:', e instanceof Error ? e.message : String(e));
+  }
+
+  // 3. Auto-generate ideas from high-score knowledge
+  let ideasCount = 0;
+  try {
+    ideasCount = await generateAutoIdeas(knowledgeSaved, items, source_url, srcType);
+  } catch (e) {
+    console.error('[ingest-result] auto-ideas failed:', e instanceof Error ? e.message : String(e));
+  }
+
+  // 3b. Explicit actionable_ideas from extraction (if any, with score >= 0.7)
+  if (score >= 0.7 && extraction.actionable_ideas && extraction.actionable_ideas.length > 0) {
+    try {
+      const { createClient: mkSb } = await import('@supabase/supabase-js');
+      const sb = mkSb(pitstopUrl, pitstopKey);
+      const ideaRows = extraction.actionable_ideas.slice(0, 5).map(idea => ({
+        content: idea.slice(0, 500),
+        summary: idea.slice(0, 80),
+        source: 'auto',
+        source_url,
+        source_type: srcType,
+        status: 'new',
+        relevance: 'hot',
+        knowledge_id: knowledgeSaved[0]?.id ?? null,
+      }));
+      const { error: ideaErr } = await sb.from('ideas').insert(ideaRows);
+      if (ideaErr) console.error('[ingest-result] ideas insert failed:', ideaErr.message);
+      else ideasCount += ideaRows.length;
+    } catch (e) {
+      console.error('[ingest-result] explicit ideas failed:', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // 4. Source quality
+  upsertSourceQuality(source_url, score, score * 0.9, entitiesCount, true).catch(e => {
+    console.warn('[ingest-result] source quality failed:', e instanceof Error ? e.message : String(e));
+  });
+
+  // 5. Mark content_discovery as done (if queued by T490)
+  try {
+    const { createClient: mkSb } = await import('@supabase/supabase-js');
+    const sb = mkSb(pitstopUrl, pitstopKey);
+    await sb.from('content_discovery')
+      .update({ status: 'done', processed_at: new Date().toISOString() })
+      .eq('url', source_url)
+      .in('status', ['pending_youtube', 'pending']);
+  } catch { /* non-fatal */ }
+
+  console.log(`[ingest-result] ${source_url}: ${knowledgeSaved.length} knowledge, ${entitiesCount} entities, ${ideasCount} ideas`);
+  res.json({
+    status: 'ingested',
+    knowledge_count: knowledgeSaved.length,
+    knowledge_ids: knowledgeSaved.map(k => k.id),
+    entities_count: entitiesCount,
+    ideas_count: ideasCount,
+  });
+});
+
 /** GET /api/rejected — list URLs rejected by pre-filter (too short, wrong language). Last 50 items. */
 app.get('/api/rejected', async (_req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
