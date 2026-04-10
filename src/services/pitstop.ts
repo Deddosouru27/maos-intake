@@ -280,9 +280,35 @@ export async function saveExtractedKnowledge(
   let smartCrudUpdates = 0;
   const hasEmbedding = !!process.env.OPENAI_API_KEY;
 
+  // Intra-batch Jaccard dedup: remove items too similar to an earlier item in the same batch
+  function jaccardSimilar(a: string, b: string): boolean {
+    const wordsA = new Set(a.toLowerCase().split(/\s+/));
+    const wordsB = new Set(b.toLowerCase().split(/\s+/));
+    const intersection = [...wordsA].filter((w) => wordsB.has(w)).length;
+    const union = new Set([...wordsA, ...wordsB]).size;
+    return union > 0 && intersection / union > 0.6;
+  }
+  const dedupedItems: typeof items = [];
+  for (const candidate of items) {
+    const isDup = dedupedItems.some((kept) => jaccardSimilar(kept.content, candidate.content));
+    if (isDup) {
+      console.log('[SAVE] Intra-batch Jaccard dedup — skipping:', candidate.content.slice(0, 80));
+      dedupSkipped++;
+    } else {
+      dedupedItems.push(candidate);
+    }
+  }
+  const filteredItems = dedupedItems;
+
   type SimilarRow = { id: string; content: string; similarity: number };
 
-  for (const item of items) {
+  for (const item of filteredItems) {
+    // Score threshold: skip low-relevance items before any DB call
+    if ((item.immediate_relevance ?? 0) < 0.4) {
+      console.log('[extraction] skipped low-score item:', item.content?.slice(0, 80), 'score:', item.immediate_relevance);
+      dedupSkipped++;
+      continue;
+    }
     // Fast content-hash dedup — skip before expensive embedding call
     const contentHash = createHash('sha256').update(item.content).digest('hex');
     const { data: hashExisting } = await supabase

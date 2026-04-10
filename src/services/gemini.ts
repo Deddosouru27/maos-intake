@@ -18,6 +18,7 @@ Return ONLY valid JSON, no markdown:
   "key_insights": [
     {
       "c": "Concrete technique or fact — one specific actionable sentence",
+      "score": 0.75,
       "tags": ["Tag-Specific-To-This-Point"],
       "entities": [{"name": "ToolName", "type": "tool|project|person|concept"}]
     }
@@ -25,6 +26,7 @@ Return ONLY valid JSON, no markdown:
   "actionable_ideas": [
     {
       "c": "Implement: specific action with specific tool",
+      "score": 0.8,
       "tags": ["Tag-Specific-To-This-Idea"],
       "entities": [{"name": "ToolName", "type": "tool"}]
     }
@@ -33,36 +35,41 @@ Return ONLY valid JSON, no markdown:
 }
 
 QUANTITY RULES:
-- Extract ALL valuable insights from the video. Do NOT limit to a fixed number.
-- Short video (< 5 min) → typically 1-3 insights.
-- Long detailed video (> 30 min) → may have 15-30 insights.
-- Do NOT pad with filler. Do NOT skip real insights to fit a number.
-- Each item must be a concrete actionable technique or fact, not a summary.
+- Extract ALL genuinely valuable insights. Do NOT pad to reach a number.
+- Short 3-min video = 1-3 items. Long 1.5-hour lecture = 15-30 items.
+- Do NOT skip real insights to stay under a number.
+- Each item must be a CONCRETE technique or fact, not a rephrased summary.
 
 PER-ITEM TAGS AND ENTITIES:
-- Each insight MUST have its OWN tags and entities specific to THAT point.
-- BAD: all items have tags ["LangGraph","Claude","Tavily","AI-Orchestration"]
-- GOOD example — video about LangGraph multi-agent:
-  Item 1: { c: "Tavily Search API дает структурированные данные для LLM", tags: ["Tavily","Search-API"], entities: [{"name":"Tavily","type":"tool"}] }
-  Item 2: { c: "Supervisor pattern снижает галлюцинации в multi-agent", tags: ["Multi-Agent","Supervisor-Pattern"], entities: [{"name":"LangGraph","type":"tool"}] }
-  Item 3: { c: "PostgreSQL checkpoints включают async workflows", tags: ["PostgreSQL","State-Management"], entities: [{"name":"PostgreSQL","type":"tool"},{"name":"Supabase","type":"tool"}] }
+- Each insight MUST have its OWN tags (1-3) specific to THAT point.
+- Do NOT copy video-level tags to every item.
+- BAD: all 10 items have tags ["LangGraph","Claude","Tavily"]
+- GOOD: item about checkpoints → ["State-Management","PostgreSQL"], item about Tavily → ["Search-API","Tavily"]
 
-QUALITY RULES:
+ENTITY CONTAMINATION RULE:
+- Extract tools, people, companies mentioned IN THE VIDEO CONTENT.
+- Do NOT add MAOS, MAOS Runner, MAOS Intake, MAOS Brain, Railway, Pitstop as entities
+  unless the video ACTUALLY DISCUSSES them by name.
+- A LangGraph tutorial must NOT have entity "MAOS Runner".
+- A Python ML video must NOT have entity "Supabase".
+
+SCORING — be HARSH and HONEST. Score EACH item INDIVIDUALLY:
+- 0.9-1.0: ONLY if step-by-step implementation for our EXACT stack
+  (Node.js, TypeScript, Supabase, Telegram bots, Claude Code, Vercel)
+- 0.7-0.89: Relevant to AI/automation but needs adaptation.
+  Example: Python LangGraph tutorial = 0.7 (concept useful, language different)
+- 0.5-0.69: Interesting concept but not directly applicable
+- 0.3-0.49: Tangentially related
+- 0.0-0.29: Not relevant — OMIT items below 0.3, do not include them at all
+Score EACH insight by its specific content, not the video overall:
+  'LangGraph checkpoints for state persistence' = 0.7
+  'Python-specific LangGraph setup' = 0.3 (omit — we use TypeScript)
+  'Supervisor pattern for multi-agent' = 0.9
+
 - BAD insight: "Видео рассматривает подходы к автоматизации"
 - GOOD insight: "pgvector HNSW index 10x faster than IVFFlat for vectors under 1M"
-- Tags: 1-3 per item, specific — "Supabase Edge Functions" not "technology"
-- Entities: proper nouns only — tools, projects, people. NEVER: "AI", "фреймворк", "мониторинг"
+- Entities: proper nouns only. NEVER: "AI", "фреймворк", "мониторинг", "автоматизация"
 - Ideas must start with verb: Добавить/Настроить/Мигрировать/Внедрить
-- SCORING RULES — be HARSH, not generous:
-  - 0.9-1.0: ONLY if directly applicable to our exact stack (Supabase, TypeScript, Telegram bots, Claude Code) AND provides step-by-step implementation
-  - 0.7-0.9: Relevant to AI/automation but needs adaptation to our stack
-  - 0.5-0.7: Interesting concept but not directly applicable
-  - 0.3-0.5: Tangentially related, nice-to-know
-  - 0.0-0.3: Not relevant to AI agents/automation/SaaS
-  Score EACH knowledge_item INDIVIDUALLY. A video about LangGraph may have:
-  'LangGraph checkpoints for state persistence' = 0.7 (concept applicable)
-  'Python-specific LangGraph setup' = 0.3 (we use TypeScript)
-  'Supervisor pattern for multi-agent' = 0.9 (directly applicable to MAOS)
 - All text content in Russian.`;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -111,43 +118,23 @@ function buildBrainAnalysis(parsed: ReturnType<typeof parseGeminiJSON>): BrainAn
     }).filter((e) => e.name);
   }
 
-  // key_insights: array of {c, tags, entities} objects (new format)
-  // or fallback to string[] (old format)
-  type InsightItem = { c?: string; tags?: string[]; entities?: unknown[] } | string;
-  const insights: KnowledgeItem[] = (parsed.key_insights ?? []).map((item: InsightItem): KnowledgeItem => {
-    const isObj = typeof item === 'object' && item !== null;
-    const content = isObj ? ((item as { c?: string }).c ?? '') : (item as string);
-    const itemTags: string[] = isObj ? ((item as { tags?: string[] }).tags ?? []) : [];
-    const itemEntities = toEntityObjects(isObj ? ((item as { entities?: unknown[] }).entities ?? []) : []);
-    return {
-      knowledge_type: 'insight' as KnowledgeType,
-      content,
-      business_value: null,
-      strategic_relevance: score * 0.85,
-      immediate_relevance: score,
-      project: null,
-      domains: itemTags,
-      solves_need: null,
-      novelty: 0.6,
-      effort: 'medium' as EffortLevel,
-      has_ready_code: false,
-      tags: itemTags,
-      entity_objects: itemEntities,
-    };
-  });
+  // key_insights / actionable_ideas: {c, score?, tags, entities} or string fallback
+  type InsightItem = { c?: string; score?: number; tags?: string[]; entities?: unknown[] } | string;
 
-  type IdeaItem = { c?: string; tags?: string[]; entities?: unknown[] } | string;
-  const ideas: KnowledgeItem[] = (parsed.actionable_ideas ?? []).map((item: IdeaItem): KnowledgeItem => {
+  function toItem(item: InsightItem, type: KnowledgeType): KnowledgeItem | null {
     const isObj = typeof item === 'object' && item !== null;
     const content = isObj ? ((item as { c?: string }).c ?? '') : (item as string);
+    if (!content.trim()) return null;
+    const itemScore = isObj ? ((item as { score?: number }).score ?? score) : score;
+    if (itemScore < 0.3) return null; // Omit low-relevance items
     const itemTags: string[] = isObj ? ((item as { tags?: string[] }).tags ?? []) : [];
     const itemEntities = toEntityObjects(isObj ? ((item as { entities?: unknown[] }).entities ?? []) : []);
     return {
-      knowledge_type: 'actionable_idea' as KnowledgeType,
+      knowledge_type: type,
       content,
       business_value: null,
-      strategic_relevance: score,
-      immediate_relevance: score,
+      strategic_relevance: itemScore * 0.85,
+      immediate_relevance: itemScore,
       project: null,
       domains: itemTags,
       solves_need: null,
@@ -157,7 +144,15 @@ function buildBrainAnalysis(parsed: ReturnType<typeof parseGeminiJSON>): BrainAn
       tags: itemTags,
       entity_objects: itemEntities,
     };
-  });
+  }
+
+  const insights: KnowledgeItem[] = ((parsed.key_insights ?? []) as InsightItem[])
+    .map((i) => toItem(i, 'insight' as KnowledgeType))
+    .filter((i): i is KnowledgeItem => i !== null);
+
+  const ideas: KnowledgeItem[] = ((parsed.actionable_ideas ?? []) as InsightItem[])
+    .map((i) => toItem(i, 'actionable_idea' as KnowledgeType))
+    .filter((i): i is KnowledgeItem => i !== null);
 
   const knowledge_items = [...insights, ...ideas];
 
