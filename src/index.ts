@@ -2853,21 +2853,21 @@ app.post('/process-rss', processLimiter, async (_req: Request, res: Response) =>
 // ── /process-ideas helpers ────────────────────────────────────────────────────
 
 interface IdeaEvaluation {
-  action: 'accepted' | 'rejected' | 'deferred';
+  action: 'accepted' | 'rejected' | 'reworked' | 'already_done';
+  reworked_content?: string;
   reason: string;
   urgency: number;
   impact: number;
-  effort: 'low' | 'medium' | 'high';
-  category: 'infrastructure' | 'intake' | 'monetization' | 'optimization' | 'research';
+  effort: '1h' | '4h' | '1d' | '3d' | '1w' | '2w+';
+  category: 'maos_core' | 'intake' | 'monetization' | 'infrastructure' | 'knowledge' | 'research' | 'life_rpg';
   suggested_assignee: string;
   suggested_work_type: string;
   depends_on: string | null;
-  duplicate_of: string | null;
+  priority_score: number;
 }
 
 function extractJSON(text: string): string {
-  // Strip markdown code fences first
-  let t = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  const t = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
   const start = t.indexOf('{');
   const end = t.lastIndexOf('}');
   if (start !== -1 && end > start) return t.slice(start, end + 1);
@@ -2876,69 +2876,65 @@ function extractJSON(text: string): string {
 
 async function evaluateIdea(idea: { id: string; content: string; source_type?: string; source_url?: string }): Promise<IdeaEvaluation> {
   const { callGeminiForText } = await import('./services/gemini');
-  const prompt = `You are MAOS idea evaluator. Be HARSH and honest.
+  const prompt = `You are MAOS idea evaluator. Be CRITICAL and HONEST.
 
 IDEA: "${idea.content}"
-SOURCE: ${idea.source_type ?? 'unknown'} (${idea.source_url ?? 'no URL'})
+SOURCE: ${idea.source_type ?? 'unknown'} (${idea.source_url ?? 'unknown'})
 
-CONTEXT: MAOS is a personal multi-agent system. Stack: TypeScript, Node.js,
-Supabase, Vercel/Railway, Telegram bot, Claude Code, Gemini CLI.
-Current priorities: autorun stability, YouTube pipeline, RSS processing,
-monetization (no revenue yet).
+MAOS CONTEXT: Personal multi-agent system. Stack: TypeScript, Node.js,
+Supabase, Vercel/Railway, Telegram bot, Claude Code, Gemini.
+Current: autorun works but unstable, YouTube pipeline working, RSS collecting,
+no monetization yet, 341 ideas unreviewed.
 
 EVALUATE:
-1. Is this a DUPLICATE of common knowledge? (e.g. "use AI for automation" = obvious)
-2. Is this ACTIONABLE? (concrete steps, not vague advice)
-3. Is this APPLICABLE to our stack? (Python-only ideas = low value)
-4. What PROBLEM does it solve?
-5. What DEPENDS on this? (needs something else first?)
+1. Is this ACTIONABLE? (concrete steps, not vague advice)
+2. Is this a DUPLICATE of obvious knowledge? ("use AI" = obvious)
+3. Is it APPLICABLE to our stack? (Python-only = low value for us)
+4. If this is just a DESCRIPTION of a product — can it be REWORDED into an action?
+   Example: "Agent.ai is a platform" → REWORK to "Study Agent.ai marketplace model for selling MAOS agents"
+5. Is this ALREADY DONE in MAOS? (WAA middleware, RSS pipeline, CEO evaluation = already exist)
 
 Return ONLY JSON:
 {
-  "action": "accepted|rejected|deferred",
-  "reason": "One sentence why",
+  "action": "accepted|rejected|reworked|already_done",
+  "reworked_content": "Better version of the idea (only if action=reworked)",
+  "reason": "One sentence why this action",
   "urgency": 0-10,
   "impact": 0-10,
-  "effort": "low|medium|high",
-  "category": "infrastructure|intake|monetization|optimization|research",
+  "effort": "1h|4h|1d|3d|1w|2w+",
+  "category": "maos_core|intake|monetization|infrastructure|knowledge|research|life_rpg",
   "suggested_assignee": "nout|intaker|pekar|artur",
-  "suggested_work_type": "blocker|critical_fix|enabling|product|nice_to_have",
-  "depends_on": "what needs to be done first or null",
-  "duplicate_of": "existing task/idea title if duplicate, or null"
+  "suggested_work_type": "blocker|critical_fix|enabling|product|nice_to_have|exploration",
+  "depends_on": "what needs to exist first, or null",
+  "priority_score": 0-100
 }
 
-REJECTION reasons:
-- "too vague" — no concrete action
-- "duplicate" — we already do this or have this task
-- "wrong stack" — Python/Java specific, we use TypeScript
-- "low impact" — nice to know but won't move the needle
-- "not now" — good but requires things we don't have yet`;
+REJECTION reasons: "too_vague", "duplicate_obvious", "wrong_stack", "already_done", "not_actionable"
+REWORK: if idea has potential but poorly worded → action="reworked" + provide reworked_content`;
 
   const raw = await callGeminiForText(prompt);
-  const parsed = JSON.parse(extractJSON(raw)) as IdeaEvaluation;
-  return parsed;
+  return JSON.parse(extractJSON(raw)) as IdeaEvaluation;
 }
 
-async function createTaskFromIdea(
+async function createTaskFromIdeaV2(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   sb: any,
-  idea: { id: string; content: string },
+  title: string,
   evaluation: IdeaEvaluation,
+  ideaId: string,
 ): Promise<void> {
+  const systemMap: Record<string, string> = { intake: 'Intake', maos_core: 'Runner', infrastructure: 'Runner' };
   const { error } = await sb.from('tasks').insert({
-    title: idea.content.slice(0, 200),
-    description: `Auto-created from idea. ${evaluation.reason}. Depends on: ${evaluation.depends_on ?? 'nothing'}`,
-    status: evaluation.urgency >= 9 ? 'todo' : 'backlog',
+    title: title.slice(0, 200),
+    description: `Auto-created from idea. ${evaluation.reason}. Effort: ${evaluation.effort}. Depends: ${evaluation.depends_on ?? 'nothing'}.`,
+    status: evaluation.urgency >= 8 ? 'todo' : 'backlog',
     work_type: evaluation.suggested_work_type,
     assignee: evaluation.suggested_assignee,
     source: 'idea_pipeline',
-    system: evaluation.category === 'intake' ? 'Intake' : evaluation.category === 'infrastructure' ? 'Runner' : 'Cross-system',
+    system: systemMap[evaluation.category] ?? 'Cross-system',
   });
-  if (error) {
-    console.warn('[process-ideas] tasks insert failed:', error.message);
-    return;
-  }
-  await sb.from('ideas').update({ converted_to_task: true }).eq('id', idea.id);
+  if (error) { console.warn('[process-ideas] tasks insert failed:', error.message); return; }
+  await sb.from('ideas').update({ converted_to_task: true }).eq('id', ideaId);
 }
 
 /** POST /process-ideas — AI evaluates unreviewed ideas via Gemini. Body: { limit? } */
@@ -2960,31 +2956,35 @@ app.post('/process-ideas', async (req: Request, res: Response) => {
     .limit(limit);
 
   if (error) { res.status(500).json({ error: String(error) }); return; }
-  if (!ideas || ideas.length === 0) { res.json({ processed: 0, results: [] }); return; }
+  if (!ideas || ideas.length === 0) { res.json({ processed: 0, accepted: 0, reworked: 0, rejected: 0, already_done: 0, tasks_created: 0, results: [] }); return; }
 
-  const results: { id: string; action: string; reason: string }[] = [];
+  type Result = { id: string; action: string; reason: string; priority?: number };
+  const results: Result[] = [];
 
   for (const idea of ideas as { id: string; content: string; source_type?: string; source_url?: string }[]) {
     try {
-      const evaluation = await evaluateIdea(idea);
+      const ev = await evaluateIdea(idea);
+      const finalContent = ev.action === 'reworked' && ev.reworked_content ? ev.reworked_content : idea.content;
+      const finalStatus = ev.action === 'reworked' ? 'accepted' : ev.action;
 
       await sb.from('ideas').update({
-        status: evaluation.action,
-        ai_analysis: evaluation,
+        status: finalStatus,
+        content: finalContent,
+        ai_analysis: ev,
         reviewed_at: new Date().toISOString(),
         reviewed_by: 'gemini-auto',
-        relevance: evaluation.impact >= 7 ? 'hot' : evaluation.impact >= 4 ? 'strategic' : 'low',
-        rejection_reason: evaluation.action === 'rejected' ? evaluation.reason : null,
+        relevance: ev.impact >= 7 ? 'hot' : ev.impact >= 4 ? 'strategic' : 'low',
+        rejection_reason: ev.action === 'rejected' ? ev.reason : null,
       }).eq('id', idea.id);
 
-      if (evaluation.action === 'accepted' && evaluation.urgency >= 7) {
-        await createTaskFromIdea(sb, idea, evaluation).catch((e) =>
+      if (['accepted', 'reworked'].includes(ev.action) && (ev.priority_score ?? 0) >= 20) {
+        await createTaskFromIdeaV2(sb, finalContent, ev, idea.id).catch((e) =>
           console.warn('[process-ideas] createTask failed:', e instanceof Error ? e.message : String(e)),
         );
       }
 
-      results.push({ id: idea.id, action: evaluation.action, reason: evaluation.reason });
-      console.log(`[process-ideas] ${idea.id}: ${evaluation.action} — ${evaluation.reason}`);
+      results.push({ id: idea.id, action: ev.action, reason: ev.reason, priority: ev.priority_score });
+      console.log(`[process-ideas] ${idea.id}: ${ev.action} p=${ev.priority_score} — ${ev.reason}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[process-ideas] idea ${idea.id} failed:`, msg);
@@ -2992,7 +2992,15 @@ app.post('/process-ideas', async (req: Request, res: Response) => {
     }
   }
 
-  res.json({ processed: results.length, results });
+  res.json({
+    processed: results.length,
+    accepted: results.filter((r) => r.action === 'accepted').length,
+    reworked: results.filter((r) => r.action === 'reworked').length,
+    rejected: results.filter((r) => r.action === 'rejected').length,
+    already_done: results.filter((r) => r.action === 'already_done').length,
+    tasks_created: results.filter((r) => (r.priority ?? 0) >= 20 && ['accepted', 'reworked'].includes(r.action)).length,
+    results,
+  });
 });
 
 /** POST /triage — per-idea Haiku triage with calibration few-shots. Body: { limit? }. */
