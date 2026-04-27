@@ -567,12 +567,12 @@ async function runPipeline(
     console.error('[PIPELINE] ideas failed:', e instanceof Error ? e.message : String(e));
   }
 
-  // Upsert entity graph — collect all entity_objects and relationships from saved items
+  // Upsert entity graph — co-occurrence edges built from per-item entity lists (no LLM cost)
   try {
-    const allEntityObjects = itemsToSave.flatMap(i => i.entity_objects ?? []);
-    const allEntityRelationships = itemsToSave.flatMap(i => i.entity_relationships ?? []);
+    const perItemEntities = itemsToSave.map(i => i.entity_objects ?? []).filter(arr => arr.length > 0);
+    const allEntityObjects = perItemEntities.flat();
     if (allEntityObjects.length > 0) {
-      await upsertEntityGraph(allEntityObjects, allEntityRelationships);
+      await upsertEntityGraph(allEntityObjects, perItemEntities);
     }
   } catch (e) {
     console.error('[PIPELINE] entity_graph failed (non-fatal):', e instanceof Error ? e.message : String(e));

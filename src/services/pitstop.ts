@@ -463,26 +463,12 @@ export async function saveExtractedKnowledge(
   return { saved, dedupSkipped, smartCrudUpdates };
 }
 
-// Infer relationship type from entity types when no explicit relationship given
-function inferRelationship(sourceType: string, targetType: string): EntityRelationshipType {
-  const key = `${sourceType}+${targetType}`;
-  switch (key) {
-    case 'tool+tool': return 'competes_with';
-    case 'person+tool': return 'uses';
-    case 'tool+person': return 'created_by';
-    case 'tool+concept': return 'implements';
-    case 'concept+tool': return 'implements';
-    case 'person+project': return 'created_by';
-    case 'project+tool': return 'built_with';
-    case 'tool+project': return 'built_with';
-    default: return 'related_to';
-  }
-}
-
 // Upsert entity_nodes and entity_edges for graph population
+// Edges built from co-occurrence: entities in the same knowledge item get an edge
+// weighted by how many items they appear together in. No LLM needed.
 export async function upsertEntityGraph(
   entityObjects: EntityObject[],
-  entityRelationships?: EntityRelationship[],
+  perItemEntities?: EntityObject[][],
 ): Promise<void> {
   if (!entityObjects || entityObjects.length === 0) return;
 
@@ -547,41 +533,38 @@ export async function upsertEntityGraph(
       .eq('id', node.id);
   }
 
-  // Build edges — use explicit relationships when available, infer from types otherwise
-  const nodeNames = [...nodeIdMap.keys()];
-  if (nodeNames.length < 2 && (!entityRelationships || entityRelationships.length === 0)) return;
+  if (nodeIdMap.size < 2) return;
 
-  const edgeRows: { source_id: string; target_id: string; relationship: string; weight: number }[] = [];
-  const edgeSeen = new Set<string>();
+  // Build co-occurrence edges: count how many items each entity pair appears in together
+  // Fall back to treating all entities as one item if per-item data not provided
+  const itemGroups: EntityObject[][] = (perItemEntities && perItemEntities.length > 0)
+    ? perItemEntities
+    : [unique];
 
-  // 1. Explicit relationships from LLM extraction
-  if (entityRelationships && entityRelationships.length > 0) {
-    for (const rel of entityRelationships) {
-      const srcId = nodeIdMap.get(rel.source);
-      const tgtId = nodeIdMap.get(rel.target);
-      if (!srcId || !tgtId || srcId === tgtId) continue;
-      const edgeKey = `${srcId}:${tgtId}:${rel.relationship}`;
-      if (edgeSeen.has(edgeKey)) continue;
-      edgeSeen.add(edgeKey);
-      edgeRows.push({ source_id: srcId, target_id: tgtId, relationship: rel.relationship, weight: 2 });
+  const coOccurrenceMap = new Map<string, number>();
+  for (const itemEntities of itemGroups) {
+    const knownNames = itemEntities.map(e => e.name).filter(n => nodeIdMap.has(n));
+    for (let i = 0; i < knownNames.length - 1; i++) {
+      for (let j = i + 1; j < knownNames.length; j++) {
+        // Canonical key: lexicographically smaller name first (undirected edge)
+        const [a, b] = knownNames[i] < knownNames[j]
+          ? [knownNames[i], knownNames[j]]
+          : [knownNames[j], knownNames[i]];
+        const key = `${a}|${b}`;
+        coOccurrenceMap.set(key, (coOccurrenceMap.get(key) ?? 0) + 1);
+      }
     }
   }
 
-  // 2. Inferred relationships for remaining pairs (type-based heuristic)
-  const typeByName = new Map(unique.map(e => [e.name, e.type]));
-  for (let i = 0; i < nodeNames.length - 1; i++) {
-    for (let j = i + 1; j < nodeNames.length; j++) {
-      const srcId = nodeIdMap.get(nodeNames[i]);
-      const tgtId = nodeIdMap.get(nodeNames[j]);
-      if (!srcId || !tgtId) continue;
-      // Skip if explicit relationship already covers this pair
-      if (edgeSeen.has(`${srcId}:${tgtId}:${inferRelationship(typeByName.get(nodeNames[i]) ?? 'concept', typeByName.get(nodeNames[j]) ?? 'concept')}`)) continue;
-      const rel = inferRelationship(typeByName.get(nodeNames[i]) ?? 'concept', typeByName.get(nodeNames[j]) ?? 'concept');
-      const edgeKey = `${srcId}:${tgtId}:${rel}`;
-      if (edgeSeen.has(edgeKey)) continue;
-      edgeSeen.add(edgeKey);
-      edgeRows.push({ source_id: srcId, target_id: tgtId, relationship: rel, weight: 1 });
-    }
+  if (coOccurrenceMap.size === 0) return;
+
+  const edgeRows: { source_id: string; target_id: string; relationship: string; weight: number }[] = [];
+  for (const [key, count] of coOccurrenceMap) {
+    const [aName, bName] = key.split('|');
+    const srcId = nodeIdMap.get(aName);
+    const tgtId = nodeIdMap.get(bName);
+    if (!srcId || !tgtId) continue;
+    edgeRows.push({ source_id: srcId, target_id: tgtId, relationship: 'co_occurs', weight: count });
   }
 
   if (edgeRows.length > 0) {
@@ -593,7 +576,7 @@ export async function upsertEntityGraph(
     }
   }
 
-  console.log(`[entity_graph] upserted ${toInsert.length} new nodes, updated ${toUpdate.length}, ${edgeRows.length} edges`);
+  console.log(`[entity_graph] upserted ${toInsert.length} new nodes, updated ${toUpdate.length}, ${edgeRows.length} co-occurrence edges`);
 }
 
 // T516: Auto-generate actionable ideas from high-score knowledge items using Haiku
