@@ -1554,6 +1554,94 @@ app.post('/api/ingest/telegram', processLimiter, async (req: Request, res: Respo
   });
 });
 
+/** POST /api/ingest/telegram/batch — fetch and ingest posts from multiple public Telegram channels.
+ *  Scrapes t.me/s/{channel} via cheerio, then runs each post through rawTextPipeline.
+ *  Body: { channels: string[], limit?: number (default 20, max 30) } */
+app.post('/api/ingest/telegram/batch', processLimiter, async (req: Request, res: Response) => {
+  const { channels, limit = 20 } = req.body as { channels?: string[]; limit?: number };
+
+  if (!Array.isArray(channels) || channels.length === 0) {
+    res.status(400).json({ error: 'channels[] required' });
+    return;
+  }
+
+  const { load } = await import('cheerio');
+  const postLimit = Math.min(Number(limit) || 20, 30);
+  const channelResults: { channel: string; fetched: number; processed: number; skipped: number; failed: number; error?: string }[] = [];
+  let totalCostUsd = 0;
+
+  for (const channel of channels.slice(0, 10)) {
+    let fetched = 0, chProcessed = 0, chSkipped = 0, chFailed = 0;
+    try {
+      const fetchUrl = `https://t.me/s/${channel}`;
+      const resp = await fetch(fetchUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9,ru;q=0.8',
+        },
+        signal: AbortSignal.timeout(12000),
+      });
+
+      if (!resp.ok) {
+        channelResults.push({ channel, fetched: 0, processed: 0, skipped: 0, failed: 0, error: `HTTP ${resp.status}` });
+        continue;
+      }
+
+      const html = await resp.text();
+      const $ = load(html);
+
+      // Posts are <article class="tgme_widget_message" data-post="channel/NNN">
+      const posts: { post_id: string; text: string; url: string; has_file: boolean }[] = [];
+      $('[data-post]').each((_, el) => {
+        const dataPost = $(el).attr('data-post') ?? '';
+        const postId = dataPost.split('/').pop() ?? '';
+        if (!postId) return;
+
+        const textEl = $(el).find('.tgme_widget_message_text');
+        // .text() strips HTML tags; replace multiple whitespace
+        const text = textEl.text().replace(/\s+/g, ' ').trim();
+        if (!text || text.length < 20) return;
+
+        const hasFile = $(el).find('.tgme_widget_message_document, .tgme_widget_message_photo, .tgme_widget_message_video').length > 0;
+        posts.push({ post_id: postId, text, url: `https://t.me/${channel}/${postId}`, has_file: hasFile });
+      });
+
+      // Take the last N posts (most recent at bottom in Telegram's HTML)
+      fetched = posts.length;
+      const toProcess = posts.slice(-postLimit);
+
+      for (const post of toProcess) {
+        try {
+          const result = await rawTextPipeline(post.text, 'telegram', post.url, `[${channel}] #${post.post_id}`);
+          if ('duplicate' in result) {
+            chSkipped++;
+          } else {
+            chProcessed++;
+            totalCostUsd += 0.0002;
+          }
+        } catch (e) {
+          chFailed++;
+          console.error(`[tg-batch] ${channel}/${post.post_id}:`, e instanceof Error ? e.message : String(e));
+        }
+      }
+
+      channelResults.push({ channel, fetched, processed: chProcessed, skipped: chSkipped, failed: chFailed });
+      console.log(`[tg-batch] ${channel}: fetched=${fetched} processed=${chProcessed} skipped=${chSkipped} failed=${chFailed}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[tg-batch] channel "${channel}" fetch failed:`, msg);
+      channelResults.push({ channel, fetched, processed: chProcessed, skipped: chSkipped, failed: chFailed, error: msg.slice(0, 200) });
+    }
+  }
+
+  res.json({
+    status: 'done',
+    results: channelResults,
+    total_processed: channelResults.reduce((s, r) => s + r.processed, 0),
+    total_cost: Number(totalCostUsd.toFixed(4)),
+  });
+});
+
 /** GET /stats — processing statistics: today count, totals, uptime. */
 app.get('/stats', async (_req: Request, res: Response) => {
   const { createClient } = await import('@supabase/supabase-js');
