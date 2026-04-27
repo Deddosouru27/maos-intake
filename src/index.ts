@@ -1488,6 +1488,82 @@ app.get('/api/stats/cost', async (_req: Request, res: Response) => {
   });
 });
 
+/** GET /api/stats/extraction-quality — quality metrics over last 100 extracted_knowledge records. */
+app.get('/api/stats/extraction-quality', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  const { data, error } = await sb
+    .from('extracted_knowledge')
+    .select('score, tags, entity_objects, source_url, knowledge_type, source_type, entities')
+    .order('created_at', { ascending: false })
+    .limit(100);
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  const rows = (data ?? []) as {
+    score: number | null;
+    tags: string[] | null;
+    entity_objects: { name: string; type: string }[] | null;
+    source_url: string | null;
+    knowledge_type: string | null;
+    source_type: string | null;
+    entities: string[] | null;
+  }[];
+
+  const n = rows.length;
+  if (n === 0) { res.json({ total: 0 }); return; }
+
+  // Core metrics
+  const scores = rows.map(r => r.score ?? 0);
+  const avgScore = scores.reduce((s, v) => s + v, 0) / n;
+
+  const withTags = rows.filter(r => (r.tags ?? []).length > 0).length;
+  const withEntities = rows.filter(r => (r.entity_objects ?? r.entities ?? []).length > 0).length;
+  const withSourceUrl = rows.filter(r => !!r.source_url).length;
+  const totalTags = rows.reduce((s, r) => s + (r.tags ?? []).length, 0);
+
+  // Distributions
+  const byKnowledgeType: Record<string, number> = {};
+  const bySourceType: Record<string, number> = {};
+  for (const r of rows) {
+    const kt = r.knowledge_type ?? 'unknown';
+    byKnowledgeType[kt] = (byKnowledgeType[kt] ?? 0) + 1;
+    const st = r.source_type ?? 'unknown';
+    bySourceType[st] = (bySourceType[st] ?? 0) + 1;
+  }
+
+  // Top 10 tags by frequency
+  const tagFreq: Record<string, number> = {};
+  for (const r of rows) {
+    for (const tag of (r.tags ?? [])) {
+      if (tag) tagFreq[tag] = (tagFreq[tag] ?? 0) + 1;
+    }
+  }
+  const top10Tags = Object.entries(tagFreq)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 10)
+    .map(([tag, count]) => ({ tag, count }));
+
+  const pct = (x: number) => Number(((x / n) * 100).toFixed(1));
+
+  res.json({
+    total_sampled: n,
+    avg_score: Number(avgScore.toFixed(3)),
+    pct_with_tags: pct(withTags),
+    pct_with_entities: pct(withEntities),
+    pct_with_source_url: pct(withSourceUrl),
+    avg_tags_per_record: Number((totalTags / n).toFixed(2)),
+    by_knowledge_type: byKnowledgeType,
+    by_source_type: bySourceType,
+    top10_tags: top10Tags,
+  });
+});
+
 /** POST /api/ingest/telegram — batch ingest posts from a Telegram channel.
  *  Body: { channel: string, posts: [{post_id, date?, text, url?, has_file?, file_name?}] }
  *  Each post goes through full pipeline: dedup → Haiku → route → save.
