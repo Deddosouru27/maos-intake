@@ -92,7 +92,42 @@ Why score 0.9: прямо релевантен нашему стеку (Claude/H
 Example 3 — generic insight (score 0.35):
 Input: Article about dual thinking in design — balancing analytics vs empathy, business vs user.
 Output item: {"t":"insight","c":"Дуалистическое мышление — способность удерживать противоположные требования (аналитика vs эмпатия, бизнес vs пользователь) без выбора одной крайности. Применимо при проектировании API и UX решений.","b":"Помогает принимать сбалансированные архитектурные решения в MAOS.","s":0.3,"r":0.35,"e":[],"eo":[]}
-Why score 0.35: полезно стратегически, но не наш стек напрямую — дефолтная зона 0.3-0.5.`;
+Why score 0.35: полезно стратегически, но не наш стек напрямую — дефолтная зона 0.3-0.5.
+
+METADATA CALIBRATION — ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА ДЛЯ КАЖДОГО ITEM:
+
+TAGS (e[]): ВСЕГДА минимум 2 тега. Теги = конкретные названия (инструменты, технологии, концепции из текста).
+BAD: [] или ["AI"] — слишком мало или слишком общий
+GOOD: ["OpenRouter", "LLM", "API Gateway"] | ["pgvector", "Supabase", "семантический поиск"]
+
+NOVELTY:
+0.1-0.3 = широко известный факт ("Redis — быстрый кэш", "TypeScript лучше JavaScript для больших проектов")
+0.4-0.6 = полезная конкретика, но не прорыв ("pgvector HNSW быстрее IVFFlat")
+0.7-0.9 = реально новый подход, неочевидная техника, свежий инструмент
+ЗАПРЕЩЕНО ставить 0.5 всем подряд — это признак того, что ты не оцениваешь новизну.
+
+KNOWLEDGE TYPE (t):
+"tool" — конкретный инструмент/библиотека/сервис с названием
+"technique" — конкретный приём, паттерн, алгоритм с чёткой механикой
+"insight" — наблюдение, принцип, вывод без конкретной реализации
+"pattern" — архитектурный паттерн с названием (CQRS, Event Sourcing, etc.)
+"lesson" — вывод из реального опыта/провала/эксперимента
+"idea" — actionable идея для применения (только если прямо actionable)
+BAD: всё маркировать "insight" — это нарушение типизации
+
+ПРИМЕРЫ ПРАВИЛЬНОЙ METADATA:
+
+Input: пост про DeepSeek API — дешевле GPT-4 в 10x, совместим с OpenAI SDK
+Output metadata: {"t":"tool","s":0.85,"r":0.9,"e":["DeepSeek","OpenAI SDK","LLM API"],"eo":[{"n":"DeepSeek","t":"tool"},{"n":"OpenAI SDK","t":"tool"}],"novelty_note":"новый дешёвый провайдер → novelty=0.8"}
+Novelty: 0.8 (новый конкурентный инструмент, не всем известен)
+
+Input: общий бизнес совет "фокусируйся на одном продукте"
+Output metadata: {"t":"insight","s":0.3,"r":0.2,"e":["стартап","фокус","продуктовая стратегия"],"eo":[]}
+Novelty: 0.2 (банальный совет, все знают)
+
+Input: конкретная техника промптинга — chain-of-density для сжатия текста
+Output metadata: {"t":"technique","s":0.7,"r":0.75,"e":["chain-of-density","промптинг","Claude","сжатие текста"],"eo":[{"n":"Claude","t":"tool"}]}
+Novelty: 0.75 (специфическая named техника, не очевидная)`;
 
 async function sendTelegramAlert(source: string, analysis: BrainAnalysis): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
