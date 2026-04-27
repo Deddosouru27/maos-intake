@@ -325,8 +325,7 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
       "s": 0.7,
       "r": 0.5,
       "e": ["EntityName", "ToolName"],
-      "eo": [{"n": "EntityName", "t": "tool|project|concept|person"}],
-      "er": [{"s": "Entity1", "t": "Entity2", "r": "uses|built_with|competes_with|part_of|created_by|implements|related_to"}]
+      "eo": [{"n": "EntityName", "t": "tool|project|concept|person"}]
     }
   ],
   "summary": "3 sentence summary of entire content.",
@@ -336,17 +335,27 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
   // 2048 per CLAUDE.md spec — 5-8 items × ~200 tokens each requires headroom
   const EXTRACTION_MAX_TOKENS = 2048;
   console.log(`[INTAKE] Haiku extraction call: max_tokens=${EXTRACTION_MAX_TOKENS}, prompt_len=${userPrompt.length}`);
+  // Prompt caching: system message cached after first call (~90% token savings on repeat calls)
   const message = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: EXTRACTION_MAX_TOKENS,
-    system: SYSTEM_PROMPT,
+    system: [{ type: 'text' as const, text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: userPrompt }],
   });
 
-  const inputTokens = message.usage?.input_tokens ?? 0;
-  const outputTokens = message.usage?.output_tokens ?? 0;
-  const cost = (inputTokens * 0.25 + outputTokens * 1.25) / 1_000_000;
-  console.log(`[INTAKE] Haiku cost: $${cost.toFixed(4)} (in:${inputTokens} out:${outputTokens} max:${EXTRACTION_MAX_TOKENS})`);
+  const usage = message.usage as {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
+  const inputTokens = usage.input_tokens ?? 0;
+  const outputTokens = usage.output_tokens ?? 0;
+  const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+  const cacheRead = usage.cache_read_input_tokens ?? 0;
+  // Pricing: input $0.25/MTok, output $1.25/MTok, cache write $0.30/MTok, cache read $0.03/MTok
+  const cost = (inputTokens * 0.25 + outputTokens * 1.25 + cacheWrite * 0.30 + cacheRead * 0.03) / 1_000_000;
+  console.log(`[INTAKE] Haiku cost: $${cost.toFixed(5)} (in:${inputTokens} out:${outputTokens} cacheWrite:${cacheWrite} cacheRead:${cacheRead} max:${EXTRACTION_MAX_TOKENS})`);
 
   const raw = message.content[0].type === 'text' ? message.content[0].text : '';
   console.log('[HAIKU] Raw response first 200 chars:', raw.slice(0, 200));
