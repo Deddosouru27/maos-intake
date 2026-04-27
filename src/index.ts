@@ -1448,7 +1448,7 @@ app.get('/api/stats/cost', async (_req: Request, res: Response) => {
   const { data, error } = await sb
     .from('context_snapshots')
     .select('content')
-    .eq('snapshot_type', 'haiku_cost_log')
+    .in('snapshot_type', ['llm_cost_log', 'haiku_cost_log'])
     .gte('created_at', sevenDaysAgo + 'T00:00:00.000Z')
     .order('created_at', { ascending: false })
     .limit(5000);

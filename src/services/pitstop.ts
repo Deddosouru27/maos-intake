@@ -5,6 +5,10 @@ import { createHash } from 'crypto';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, EntityObject, EntityRelationship, EntityRelationshipType } from '../types';
 
 const openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const deepseekClient = new OpenAI({
+  baseURL: 'https://api.deepseek.com',
+  apiKey: process.env.DEEPSEEK_API_KEY ?? '',
+});
 
 // Similarity-based CRUD decision — replaces Haiku call (saves ~$0.00002/item, same quality)
 // sim >= 0.95: texts are near-identical variants → UPDATE (new supersedes old)
@@ -631,24 +635,65 @@ ${itemsText}
 
   let ideas: (string | null)[] = [];
   try {
-    const haikuClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 1 });
-    const msg = await haikuClient.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 256,
-      messages: [{ role: 'user', content: prompt }],
-    });
-    const u = msg.usage as { input_tokens: number; output_tokens: number };
-    const ideaCost = (u.input_tokens * 0.25 + u.output_tokens * 1.25) / 1_000_000;
-    logHaikuCost({ inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheWriteTokens: 0, cacheReadTokens: 0, costUsd: ideaCost, source: 'auto_ideas' }).catch(() => { /* non-blocking */ });
-    const raw = (msg.content[0] as { type: string; text?: string }).text ?? '';
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-    const start = cleaned.indexOf('[');
-    const end = cleaned.lastIndexOf(']');
-    if (start !== -1 && end > start) {
-      ideas = JSON.parse(cleaned.slice(start, end + 1)) as (string | null)[];
+    let raw = '';
+    let ideaModel = 'deepseek';
+
+    if (process.env.DEEPSEEK_API_KEY) {
+      try {
+        const dsResp = await deepseekClient.chat.completions.create({
+          model: 'deepseek-chat',
+          max_tokens: 256,
+          temperature: 0,
+          response_format: { type: 'json_object' },
+          messages: [{ role: 'user', content: prompt + '\n\nRespond with JSON: {"ideas": ["идея 1", null, "идея 2"]}' }],
+        });
+        raw = dsResp.choices[0]?.message?.content ?? '';
+        const u = dsResp.usage;
+        const inputTokens = u?.prompt_tokens ?? 0;
+        const outputTokens = u?.completion_tokens ?? 0;
+        const ideaCost = (inputTokens * 0.27 + outputTokens * 1.10) / 1_000_000;
+        logLlmCost({ inputTokens, outputTokens, cacheWriteTokens: 0, cacheReadTokens: 0, costUsd: ideaCost, source: 'auto_ideas', model: 'deepseek' }).catch(() => { /* non-blocking */ });
+      } catch (dsErr) {
+        console.warn('[auto-ideas] DeepSeek failed, falling back to Haiku:', dsErr instanceof Error ? dsErr.message : String(dsErr));
+        raw = '';
+        ideaModel = 'haiku';
+      }
+    } else {
+      ideaModel = 'haiku';
+    }
+
+    if (!raw || ideaModel === 'haiku') {
+      const haikuAnthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 1 });
+      const msg = await haikuAnthropicClient.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 256,
+        messages: [{ role: 'user', content: prompt }],
+      });
+      raw = (msg.content[0] as { type: string; text?: string }).text ?? '';
+      const u = msg.usage as { input_tokens: number; output_tokens: number };
+      const ideaCost = (u.input_tokens * 0.80 + u.output_tokens * 4.00) / 1_000_000;
+      logLlmCost({ inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheWriteTokens: 0, cacheReadTokens: 0, costUsd: ideaCost, source: 'auto_ideas', model: 'haiku' }).catch(() => { /* non-blocking */ });
+    }
+
+    // DeepSeek returns json_object — parse ideas array from it
+    let cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    // Try {"ideas":[...]} wrapper first (DeepSeek json_object mode)
+    try {
+      const parsed = JSON.parse(cleaned) as { ideas?: (string | null)[] };
+      if (Array.isArray(parsed.ideas)) {
+        ideas = parsed.ideas;
+        cleaned = ''; // skip fallback
+      }
+    } catch { /* fall through to array extraction */ }
+    if (cleaned) {
+      const start = cleaned.indexOf('[');
+      const end = cleaned.lastIndexOf(']');
+      if (start !== -1 && end > start) {
+        ideas = JSON.parse(cleaned.slice(start, end + 1)) as (string | null)[];
+      }
     }
   } catch (e) {
-    console.error('[auto-ideas] Haiku call failed:', e instanceof Error ? e.message : String(e));
+    console.error('[auto-ideas] LLM call failed:', e instanceof Error ? e.message : String(e));
     return 0;
   }
 
@@ -815,14 +860,15 @@ export async function upsertSourceQuality(
   }
 }
 
-// Fire-and-forget Haiku cost tracker — writes to context_snapshots for /api/stats/cost aggregation
-export async function logHaikuCost(params: {
+// Fire-and-forget LLM cost tracker — writes to context_snapshots for /api/stats/cost aggregation
+export async function logLlmCost(params: {
   inputTokens: number;
   outputTokens: number;
   cacheWriteTokens: number;
   cacheReadTokens: number;
   costUsd: number;
   source: string;
+  model: string;
 }): Promise<void> {
   const url = process.env.PITSTOP_SUPABASE_URL ?? process.env.SUPABASE_PITSTOP_URL;
   const key = process.env.PITSTOP_SUPABASE_ANON_KEY ?? process.env.SUPABASE_PITSTOP_ANON_KEY;
@@ -830,9 +876,10 @@ export async function logHaikuCost(params: {
   try {
     const supabase = createClient(url, key);
     await supabase.from('context_snapshots').insert({
-      snapshot_type: 'haiku_cost_log',
+      snapshot_type: 'llm_cost_log',
       content: {
-        type: 'haiku_cost_log',
+        type: 'llm_cost_log',
+        model: params.model,
         date: new Date().toISOString().slice(0, 10),
         input_tokens: params.inputTokens,
         output_tokens: params.outputTokens,

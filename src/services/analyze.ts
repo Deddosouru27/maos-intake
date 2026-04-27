@@ -1,10 +1,17 @@
 import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel, EntityObject, EntityRelationship, EntityRelationshipType } from '../types';
 import { getFullContext, buildContextString } from './projectContext';
-import { logHaikuCost } from './pitstop';
+import { logLlmCost } from './pitstop';
 
 // API Cost Protection: max 1 retry. See incident 29.03.
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 1 });
+const haikuClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 1 });
+
+// DeepSeek primary — OpenAI-compatible API, ~60x cheaper than Haiku 4.5
+const deepseek = new OpenAI({
+  baseURL: 'https://api.deepseek.com',
+  apiKey: process.env.DEEPSEEK_API_KEY ?? '',
+});
 
 // Circuit breaker state — reset on process restart
 let consecutiveEmptyResponses = 0;
@@ -135,8 +142,8 @@ function parseHaikuJSON(raw: string): any {
         return JSON.parse(text.slice(start, end + 1));
       } catch (e2) {
         const msg = e2 instanceof Error ? e2.message : String(e2);
-        console.error('[HAIKU] Parse failed after extraction:', msg);
-        console.error('[HAIKU] First 200 chars:', text.slice(0, 200));
+        console.error('[LLM] Parse failed after extraction:', msg);
+        console.error('[LLM] First 200 chars:', text.slice(0, 200));
       }
     }
     return { items: [], summary: '', category: 'parse_error' };
@@ -275,6 +282,21 @@ export async function analyzeWithChunking(text: string, source: string): Promise
 }
 
 export async function analyzeContent(text: string, source: string, isChunk = false): Promise<BrainAnalysis> {
+  // Pre-filter: skip trivially short content before any LLM call
+  if (text.trim().length < 100) {
+    console.log(`[ANALYZE] text too short (${text.trim().length} chars), skipping LLM call`);
+    return {
+      summary: '',
+      knowledge_items: [],
+      overall_immediate: 0,
+      overall_strategic: 0,
+      priority_signal: false,
+      priority_reason: 'too_short',
+      category: 'skipped',
+      language: 'other',
+    };
+  }
+
   // Token estimation upstream guard — before expensive truncation logic
   const estimatedTokens = Math.ceil(text.length / 4);
   console.log(`[extraction] estimated tokens: ${estimatedTokens}`);
@@ -333,34 +355,67 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
   "entities": ["Supabase", "Claude Code", "MAOS"]
 }`;
 
-  // 2048 per CLAUDE.md spec — 5-8 items × ~200 tokens each requires headroom
-  const EXTRACTION_MAX_TOKENS = 2048;
-  console.log(`[INTAKE] Haiku extraction call: max_tokens=${EXTRACTION_MAX_TOKENS}, prompt_len=${userPrompt.length}`);
-  // Prompt caching: system message cached after first call (~90% token savings on repeat calls)
-  const message = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: EXTRACTION_MAX_TOKENS,
-    system: [{ type: 'text' as const, text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content: userPrompt }],
-  });
+  const EXTRACTION_MAX_TOKENS = 1024;
+  let raw = '';
+  let llmModel = 'deepseek';
 
-  const usage = message.usage as {
-    input_tokens: number;
-    output_tokens: number;
-    cache_creation_input_tokens?: number;
-    cache_read_input_tokens?: number;
-  };
-  const inputTokens = usage.input_tokens ?? 0;
-  const outputTokens = usage.output_tokens ?? 0;
-  const cacheWrite = usage.cache_creation_input_tokens ?? 0;
-  const cacheRead = usage.cache_read_input_tokens ?? 0;
-  // Pricing: input $0.25/MTok, output $1.25/MTok, cache write $0.30/MTok, cache read $0.03/MTok
-  const cost = (inputTokens * 0.25 + outputTokens * 1.25 + cacheWrite * 0.30 + cacheRead * 0.03) / 1_000_000;
-  console.log(`[INTAKE] Haiku cost: $${cost.toFixed(5)} (in:${inputTokens} out:${outputTokens} cacheWrite:${cacheWrite} cacheRead:${cacheRead} max:${EXTRACTION_MAX_TOKENS})`);
-  logHaikuCost({ inputTokens, outputTokens, cacheWriteTokens: cacheWrite, cacheReadTokens: cacheRead, costUsd: cost, source: 'extraction' }).catch(() => { /* non-blocking */ });
+  // Primary: DeepSeek (OpenAI-compatible, json_object mode, no prompt caching needed at this price)
+  if (process.env.DEEPSEEK_API_KEY) {
+    try {
+      console.log(`[INTAKE] DeepSeek extraction call: max_tokens=${EXTRACTION_MAX_TOKENS}, prompt_len=${userPrompt.length}`);
+      const dsResp = await deepseek.chat.completions.create({
+        model: 'deepseek-chat',
+        max_tokens: EXTRACTION_MAX_TOKENS,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+      });
+      raw = dsResp.choices[0]?.message?.content ?? '';
+      const u = dsResp.usage;
+      const inputTokens = u?.prompt_tokens ?? 0;
+      const outputTokens = u?.completion_tokens ?? 0;
+      // Pricing: deepseek-chat $0.27/MTok input, $1.10/MTok output
+      const cost = (inputTokens * 0.27 + outputTokens * 1.10) / 1_000_000;
+      console.log(`[INTAKE] DeepSeek cost: $${cost.toFixed(5)} (in:${inputTokens} out:${outputTokens})`);
+      logLlmCost({ inputTokens, outputTokens, cacheWriteTokens: 0, cacheReadTokens: 0, costUsd: cost, source: 'extraction', model: 'deepseek' }).catch(() => { /* non-blocking */ });
+    } catch (dsErr) {
+      const msg = dsErr instanceof Error ? dsErr.message : String(dsErr);
+      console.warn(`[INTAKE] DeepSeek failed (${msg}), falling back to Haiku`);
+      raw = '';
+      llmModel = 'haiku';
+    }
+  } else {
+    llmModel = 'haiku';
+  }
 
-  const raw = message.content[0].type === 'text' ? message.content[0].text : '';
-  console.log('[HAIKU] Raw response first 200 chars:', raw.slice(0, 200));
+  // Fallback: Haiku with prompt caching
+  if (!raw || llmModel === 'haiku') {
+    console.log(`[INTAKE] Haiku extraction call (fallback): max_tokens=${EXTRACTION_MAX_TOKENS}, prompt_len=${userPrompt.length}`);
+    const message = await haikuClient.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: EXTRACTION_MAX_TOKENS,
+      system: [{ type: 'text' as const, text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: userPrompt }],
+    });
+    raw = message.content[0].type === 'text' ? message.content[0].text : '';
+    const usage = message.usage as {
+      input_tokens: number; output_tokens: number;
+      cache_creation_input_tokens?: number; cache_read_input_tokens?: number;
+    };
+    const inputTokens = usage.input_tokens ?? 0;
+    const outputTokens = usage.output_tokens ?? 0;
+    const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+    const cacheRead = usage.cache_read_input_tokens ?? 0;
+    // Pricing: Haiku 4.5 $0.80/MTok input, $4.00/MTok output, cache write $1.00/MTok, cache read $0.08/MTok
+    const cost = (inputTokens * 0.80 + outputTokens * 4.00 + cacheWrite * 1.00 + cacheRead * 0.08) / 1_000_000;
+    console.log(`[INTAKE] Haiku cost: $${cost.toFixed(5)} (in:${inputTokens} out:${outputTokens} cacheWrite:${cacheWrite} cacheRead:${cacheRead})`);
+    logLlmCost({ inputTokens, outputTokens, cacheWriteTokens: cacheWrite, cacheReadTokens: cacheRead, costUsd: cost, source: 'extraction', model: 'haiku' }).catch(() => { /* non-blocking */ });
+  }
+
+  console.log(`[${llmModel.toUpperCase()}] Raw response first 200 chars:`, raw.slice(0, 200));
 
   // Circuit breaker: empty or near-empty response — do NOT retry, do NOT save
   if (raw.trim().length < 20) {
@@ -402,7 +457,7 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
   console.log('[ANALYZE] Items count:', compact?.items?.length ?? 0);
 
   if (compact?.category === 'parse_error' || !Array.isArray(compact?.items)) {
-    console.error('[HAIKU] JSON parse failed, raw (first 300):', raw.slice(0, 300));
+    console.error('[LLM] JSON parse failed, raw (first 300):', raw.slice(0, 300));
     return {
       summary: 'JSON parse failed',
       knowledge_items: [],
