@@ -641,7 +641,7 @@ ${itemsText}
     if (process.env.DEEPSEEK_API_KEY) {
       try {
         const dsResp = await deepseekClient.chat.completions.create({
-          model: 'deepseek-chat',
+          model: 'deepseek-v4-flash',
           max_tokens: 256,
           temperature: 0,
           response_format: { type: 'json_object' },
@@ -651,7 +651,8 @@ ${itemsText}
         const u = dsResp.usage;
         const inputTokens = u?.prompt_tokens ?? 0;
         const outputTokens = u?.completion_tokens ?? 0;
-        const ideaCost = (inputTokens * 0.27 + outputTokens * 1.10) / 1_000_000;
+        // Pricing: deepseek-v4-flash $0.014/MTok input, $0.028/MTok output
+        const ideaCost = (inputTokens * 0.014 + outputTokens * 0.028) / 1_000_000;
         logLlmCost({ inputTokens, outputTokens, cacheWriteTokens: 0, cacheReadTokens: 0, costUsd: ideaCost, source: 'auto_ideas', model: 'deepseek' }).catch(() => { /* non-blocking */ });
       } catch (dsErr) {
         console.warn('[auto-ideas] DeepSeek failed, falling back to Haiku:', dsErr instanceof Error ? dsErr.message : String(dsErr));

@@ -1,8 +1,12 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
+import { createHash } from 'crypto';
 import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel, EntityObject, EntityRelationship, EntityRelationshipType } from '../types';
 import { getFullContext, buildContextString } from './projectContext';
 import { logLlmCost } from './pitstop';
+
+// In-process dedup: prevents re-analyzing the same text chunk within one Lambda invocation
+const analyzedHashes = new Set<string>();
 
 // API Cost Protection: max 1 retry. See incident 29.03.
 const haikuClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 1 });
@@ -267,6 +271,27 @@ const CHUNKING_THRESHOLD = 4000; // chars
 const MAX_CHUNKS = 20;
 
 export async function analyzeWithChunking(text: string, source: string): Promise<BrainAnalysis> {
+  // DB dedup: skip if this exact full text was already processed (cross-invocation guard)
+  const fullHash = createHash('sha256').update(text).digest('hex');
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (pitstopUrl && pitstopKey) {
+    try {
+      const { createClient } = await import('@supabase/supabase-js');
+      const sb = createClient(pitstopUrl, pitstopKey);
+      const { data } = await sb
+        .from('ingested_content')
+        .select('id')
+        .eq('content_hash', fullHash)
+        .eq('processing_status', 'done')
+        .limit(1);
+      if (data && data.length > 0) {
+        console.log(`[ANALYZE] DB dedup hit — hash=${fullHash.slice(0, 8)} already done, skipping LLM`);
+        return { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: 'dedup_skip', category: 'skipped', language: 'other' };
+      }
+    } catch { /* proceed if DB check fails */ }
+  }
+
   if (text.length <= CHUNKING_THRESHOLD) {
     return analyzeContent(text, source, false);
   }
@@ -390,16 +415,24 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
   "entities": ["Supabase", "Claude Code", "MAOS"]
 }`;
 
+  // In-process dedup: prevent same chunk from being analyzed twice within one invocation
+  const chunkHash = createHash('sha256').update(trimmedText).digest('hex');
+  if (analyzedHashes.has(chunkHash)) {
+    console.log(`[ANALYZE] in-process dedup hit — hash=${chunkHash.slice(0, 8)}, skipping LLM`);
+    return { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: 'dedup_skip', category: 'skipped', language: 'other' };
+  }
+  analyzedHashes.add(chunkHash);
+
   const EXTRACTION_MAX_TOKENS = 1024;
   let raw = '';
   let llmModel = 'deepseek';
 
-  // Primary: DeepSeek (OpenAI-compatible, json_object mode, no prompt caching needed at this price)
+  // Primary: DeepSeek v4 Flash — $0.014/MTok input, ~20x cheaper than deepseek-chat
   if (process.env.DEEPSEEK_API_KEY) {
     try {
       console.log(`[INTAKE] DeepSeek extraction call: max_tokens=${EXTRACTION_MAX_TOKENS}, prompt_len=${userPrompt.length}`);
       const dsResp = await deepseek.chat.completions.create({
-        model: 'deepseek-chat',
+        model: 'deepseek-v4-flash',
         max_tokens: EXTRACTION_MAX_TOKENS,
         temperature: 0,
         response_format: { type: 'json_object' },
@@ -412,8 +445,8 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
       const u = dsResp.usage;
       const inputTokens = u?.prompt_tokens ?? 0;
       const outputTokens = u?.completion_tokens ?? 0;
-      // Pricing: deepseek-chat $0.27/MTok input, $1.10/MTok output
-      const cost = (inputTokens * 0.27 + outputTokens * 1.10) / 1_000_000;
+      // Pricing: deepseek-v4-flash $0.014/MTok input, $0.028/MTok output
+      const cost = (inputTokens * 0.014 + outputTokens * 0.028) / 1_000_000;
       console.log(`[INTAKE] DeepSeek cost: $${cost.toFixed(5)} (in:${inputTokens} out:${outputTokens})`);
       logLlmCost({ inputTokens, outputTokens, cacheWriteTokens: 0, cacheReadTokens: 0, costUsd: cost, source: 'extraction', model: 'deepseek' }).catch(() => { /* non-blocking */ });
     } catch (dsErr) {
