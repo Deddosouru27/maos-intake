@@ -1499,14 +1499,14 @@ app.get('/api/stats/extraction-quality', async (_req: Request, res: Response) =>
 
   const { data, error } = await sb
     .from('extracted_knowledge')
-    .select('score, tags, entity_objects, source_url, knowledge_type, source_type, entities')
+    .select('immediate_relevance, tags, entity_objects, source_url, knowledge_type, source_type, entities')
     .order('created_at', { ascending: false })
     .limit(100);
 
   if (error) { res.status(500).json({ error: error.message }); return; }
 
   const rows = (data ?? []) as {
-    score: number | null;
+    immediate_relevance: number | null;
     tags: string[] | null;
     entity_objects: { name: string; type: string }[] | null;
     source_url: string | null;
@@ -1519,7 +1519,7 @@ app.get('/api/stats/extraction-quality', async (_req: Request, res: Response) =>
   if (n === 0) { res.json({ total: 0 }); return; }
 
   // Core metrics
-  const scores = rows.map(r => r.score ?? 0);
+  const scores = rows.map(r => r.immediate_relevance ?? 0);
   const avgScore = scores.reduce((s, v) => s + v, 0) / n;
 
   const withTags = rows.filter(r => (r.tags ?? []).length > 0).length;
