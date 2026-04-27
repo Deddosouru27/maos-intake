@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel, EntityObject, EntityRelationship, EntityRelationshipType } from '../types';
 import { getFullContext, buildContextString } from './projectContext';
+import { logHaikuCost } from './pitstop';
 
 // API Cost Protection: max 1 retry. See incident 29.03.
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 1 });
@@ -356,6 +357,7 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
   // Pricing: input $0.25/MTok, output $1.25/MTok, cache write $0.30/MTok, cache read $0.03/MTok
   const cost = (inputTokens * 0.25 + outputTokens * 1.25 + cacheWrite * 0.30 + cacheRead * 0.03) / 1_000_000;
   console.log(`[INTAKE] Haiku cost: $${cost.toFixed(5)} (in:${inputTokens} out:${outputTokens} cacheWrite:${cacheWrite} cacheRead:${cacheRead} max:${EXTRACTION_MAX_TOKENS})`);
+  logHaikuCost({ inputTokens, outputTokens, cacheWriteTokens: cacheWrite, cacheReadTokens: cacheRead, costUsd: cost, source: 'extraction' }).catch(() => { /* non-blocking */ });
 
   const raw = message.content[0].type === 'text' ? message.content[0].text : '';
   console.log('[HAIKU] Raw response first 200 chars:', raw.slice(0, 200));

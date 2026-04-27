@@ -637,6 +637,9 @@ ${itemsText}
       max_tokens: 256,
       messages: [{ role: 'user', content: prompt }],
     });
+    const u = msg.usage as { input_tokens: number; output_tokens: number };
+    const ideaCost = (u.input_tokens * 0.25 + u.output_tokens * 1.25) / 1_000_000;
+    logHaikuCost({ inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheWriteTokens: 0, cacheReadTokens: 0, costUsd: ideaCost, source: 'auto_ideas' }).catch(() => { /* non-blocking */ });
     const raw = (msg.content[0] as { type: string; text?: string }).text ?? '';
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
     const start = cleaned.indexOf('[');
@@ -810,4 +813,34 @@ export async function upsertSourceQuality(
   } else {
     console.log(`[source_quality] ${domain}: score=${row.avg_score} success=${row.success_rate} entities=${row.avg_entity_count} n=${row.total_processed}`);
   }
+}
+
+// Fire-and-forget Haiku cost tracker — writes to context_snapshots for /api/stats/cost aggregation
+export async function logHaikuCost(params: {
+  inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+  source: string;
+}): Promise<void> {
+  const url = process.env.PITSTOP_SUPABASE_URL ?? process.env.SUPABASE_PITSTOP_URL;
+  const key = process.env.PITSTOP_SUPABASE_ANON_KEY ?? process.env.SUPABASE_PITSTOP_ANON_KEY;
+  if (!url || !key) return;
+  try {
+    const supabase = createClient(url, key);
+    await supabase.from('context_snapshots').insert({
+      snapshot_type: 'haiku_cost_log',
+      content: {
+        type: 'haiku_cost_log',
+        date: new Date().toISOString().slice(0, 10),
+        input_tokens: params.inputTokens,
+        output_tokens: params.outputTokens,
+        cache_write_tokens: params.cacheWriteTokens,
+        cache_read_tokens: params.cacheReadTokens,
+        cost_usd: params.costUsd,
+        source: params.source,
+      },
+    });
+  } catch { /* non-blocking */ }
 }

@@ -1432,6 +1432,62 @@ app.get('/api/rejected', async (_req: Request, res: Response) => {
   });
 });
 
+/** GET /api/stats/cost — daily Haiku API cost tracker. Returns today + 7-day history.
+ *  budget_warning: true when today's estimated cost exceeds $1.00 */
+app.get('/api/stats/cost', async (_req: Request, res: Response) => {
+  const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
+  const pitstopKey = process.env.PITSTOP_SUPABASE_ANON_KEY;
+  if (!pitstopUrl || !pitstopKey) { res.status(500).json({ error: 'Missing env vars' }); return; }
+
+  const { createClient: mkSb } = await import('@supabase/supabase-js');
+  const sb = mkSb(pitstopUrl, pitstopKey);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+
+  const { data, error } = await sb
+    .from('context_snapshots')
+    .select('content')
+    .eq('snapshot_type', 'haiku_cost_log')
+    .gte('created_at', sevenDaysAgo + 'T00:00:00.000Z')
+    .order('created_at', { ascending: false })
+    .limit(5000);
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  type DayStats = { calls: number; input_tokens: number; output_tokens: number; cache_write_tokens: number; cache_read_tokens: number; cost_usd: number };
+  const byDay = new Map<string, DayStats>();
+
+  for (const row of (data ?? [])) {
+    const c = row.content as { date?: string; input_tokens?: number; output_tokens?: number; cache_write_tokens?: number; cache_read_tokens?: number; cost_usd?: number };
+    const day = c.date ?? today;
+    const prev = byDay.get(day) ?? { calls: 0, input_tokens: 0, output_tokens: 0, cache_write_tokens: 0, cache_read_tokens: 0, cost_usd: 0 };
+    byDay.set(day, {
+      calls: prev.calls + 1,
+      input_tokens: prev.input_tokens + (c.input_tokens ?? 0),
+      output_tokens: prev.output_tokens + (c.output_tokens ?? 0),
+      cache_write_tokens: prev.cache_write_tokens + (c.cache_write_tokens ?? 0),
+      cache_read_tokens: prev.cache_read_tokens + (c.cache_read_tokens ?? 0),
+      cost_usd: prev.cost_usd + (c.cost_usd ?? 0),
+    });
+  }
+
+  const BUDGET_LIMIT_USD = 1.0;
+  const todayStats = byDay.get(today) ?? { calls: 0, input_tokens: 0, output_tokens: 0, cache_write_tokens: 0, cache_read_tokens: 0, cost_usd: 0 };
+  const round5 = (n: number) => Number(n.toFixed(5));
+
+  res.json({
+    today: { date: today, ...todayStats, cost_usd: round5(todayStats.cost_usd) },
+    budget_warning: todayStats.cost_usd > BUDGET_LIMIT_USD,
+    budget_limit_usd: BUDGET_LIMIT_USD,
+    last_7_days: Object.fromEntries(
+      [...byDay.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([d, s]) => [d, { ...s, cost_usd: round5(s.cost_usd) }])
+    ),
+  });
+});
+
 /** POST /api/ingest/telegram — batch ingest posts from a Telegram channel.
  *  Body: { channel: string, posts: [{post_id, date?, text, url?, has_file?, file_name?}] }
  *  Each post goes through full pipeline: dedup → Haiku → route → save.
