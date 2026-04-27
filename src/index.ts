@@ -1432,6 +1432,72 @@ app.get('/api/rejected', async (_req: Request, res: Response) => {
   });
 });
 
+/** POST /api/ingest/telegram — batch ingest posts from a Telegram channel.
+ *  Body: { channel: string, posts: [{post_id, date?, text, url?, has_file?, file_name?}] }
+ *  Each post goes through full pipeline: dedup → Haiku → route → save.
+ *  source_url: https://t.me/{channel}/{post_id}, source_type: telegram */
+app.post('/api/ingest/telegram', processLimiter, async (req: Request, res: Response) => {
+  interface TelegramPost {
+    post_id: string | number;
+    date?: string;
+    text: string;
+    url?: string;
+    has_file?: boolean;
+    file_name?: string;
+  }
+  const { channel, posts } = req.body as { channel?: string; posts?: TelegramPost[] };
+
+  if (!channel || !Array.isArray(posts) || posts.length === 0) {
+    res.status(400).json({ error: 'channel (string) and posts (array) are required' });
+    return;
+  }
+
+  const MAX_POSTS = 50;
+  const batch = posts.slice(0, MAX_POSTS);
+  const processed: { post_id: string | number; source_url: string; knowledge_count: number }[] = [];
+  const skipped: { post_id: string | number; reason: string }[] = [];
+  const failed: { post_id: string | number; error: string }[] = [];
+
+  for (const post of batch) {
+    if (!post.text || post.text.trim().length < 20) {
+      skipped.push({ post_id: post.post_id, reason: 'too_short' });
+      continue;
+    }
+
+    const sourceUrl = post.url ?? `https://t.me/${channel}/${post.post_id}`;
+    // Include file/channel info in title so it surfaces in ingested_content
+    const title = post.has_file
+      ? `[${channel}] #${post.post_id} 📎 ${post.file_name ?? 'file'}`
+      : `[${channel}] #${post.post_id}`;
+
+    try {
+      const result = await rawTextPipeline(post.text.trim(), 'telegram', sourceUrl, title);
+      if ('duplicate' in result) {
+        skipped.push({ post_id: post.post_id, reason: 'duplicate' });
+      } else {
+        processed.push({ post_id: post.post_id, source_url: sourceUrl, knowledge_count: result.diag.savedItems });
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[telegram-ingest] post ${post.post_id} failed:`, msg);
+      failed.push({ post_id: post.post_id, error: msg.slice(0, 200) });
+    }
+  }
+
+  const totalCost = (processed.length * 0.0002).toFixed(4);
+  console.log(`[telegram-ingest] channel=${channel} processed=${processed.length} skipped=${skipped.length} failed=${failed.length} est_cost=$${totalCost}`);
+
+  res.json({
+    status: 'done',
+    channel,
+    processed: processed.length,
+    skipped: skipped.length,
+    failed: failed.length,
+    estimated_cost_usd: totalCost,
+    details: { processed, skipped, failed },
+  });
+});
+
 /** GET /stats — processing statistics: today count, totals, uptime. */
 app.get('/stats', async (_req: Request, res: Response) => {
   const { createClient } = await import('@supabase/supabase-js');
