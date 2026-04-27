@@ -1555,8 +1555,10 @@ app.post('/api/ingest/telegram', processLimiter, async (req: Request, res: Respo
 });
 
 /** POST /api/ingest/telegram/batch — fetch and ingest posts from multiple public Telegram channels.
- *  Scrapes t.me/s/{channel} via cheerio, then runs each post through rawTextPipeline.
- *  Body: { channels: string[], limit?: number (default 20, max 30) } */
+ *  Scrapes t.me/s/{channel} with cheerio: .tgme_widget_message_wrap[data-post].
+ *  2s pause between channels to avoid hammering t.me.
+ *  Body: { channels: string[], limit?: number (default 20, max 30 per channel) }
+ *  NOTE: on Vercel use limit ≤ 5 to stay within 60s; on Railway limit ≤ 20 is fine. */
 app.post('/api/ingest/telegram/batch', processLimiter, async (req: Request, res: Response) => {
   const { channels, limit = 20 } = req.body as { channels?: string[]; limit?: number };
 
@@ -1567,11 +1569,16 @@ app.post('/api/ingest/telegram/batch', processLimiter, async (req: Request, res:
 
   const { load } = await import('cheerio');
   const postLimit = Math.min(Number(limit) || 20, 30);
-  const channelResults: { channel: string; fetched: number; processed: number; skipped: number; failed: number; error?: string }[] = [];
+  const channelResults: { channel: string; fetched: number; processed: number; skipped: number; failed: number; cost: string; error?: string }[] = [];
   let totalCostUsd = 0;
 
-  for (const channel of channels.slice(0, 10)) {
-    let fetched = 0, chProcessed = 0, chSkipped = 0, chFailed = 0;
+  for (let ci = 0; ci < Math.min(channels.length, 10); ci++) {
+    // 2s pause between channels — don't hammer t.me
+    if (ci > 0) await new Promise(r => setTimeout(r, 2000));
+
+    const channel = channels[ci];
+    let fetched = 0, chProcessed = 0, chSkipped = 0, chFailed = 0, chCostUsd = 0;
+
     try {
       const fetchUrl = `https://t.me/s/${channel}`;
       const resp = await fetch(fetchUrl, {
@@ -1583,41 +1590,47 @@ app.post('/api/ingest/telegram/batch', processLimiter, async (req: Request, res:
       });
 
       if (!resp.ok) {
-        channelResults.push({ channel, fetched: 0, processed: 0, skipped: 0, failed: 0, error: `HTTP ${resp.status}` });
+        channelResults.push({ channel, fetched: 0, processed: 0, skipped: 0, failed: 0, cost: '0.0000', error: `HTTP ${resp.status}` });
         continue;
       }
 
       const html = await resp.text();
       const $ = load(html);
 
-      // Posts are <article class="tgme_widget_message" data-post="channel/NNN">
-      const posts: { post_id: string; text: string; url: string; has_file: boolean }[] = [];
-      $('[data-post]').each((_, el) => {
+      // Selector: .tgme_widget_message_wrap with data-post="channel/NNN"
+      const posts: { post_id: string; date: string; text: string; url: string; has_file: boolean; file_name: string }[] = [];
+      $('.tgme_widget_message_wrap[data-post]').each((_, el) => {
         const dataPost = $(el).attr('data-post') ?? '';
         const postId = dataPost.split('/').pop() ?? '';
         if (!postId) return;
 
-        const textEl = $(el).find('.tgme_widget_message_text');
-        // .text() strips HTML tags; replace multiple whitespace
-        const text = textEl.text().replace(/\s+/g, ' ').trim();
+        const text = $(el).find('.tgme_widget_message_text').text().replace(/\s+/g, ' ').trim();
         if (!text || text.length < 20) return;
 
-        const hasFile = $(el).find('.tgme_widget_message_document, .tgme_widget_message_photo, .tgme_widget_message_video').length > 0;
-        posts.push({ post_id: postId, text, url: `https://t.me/${channel}/${postId}`, has_file: hasFile });
+        const date = $(el).find('time[datetime]').attr('datetime') ?? new Date().toISOString();
+        const fileEl = $(el).find('.tgme_widget_message_document');
+        const hasFile = fileEl.length > 0;
+        const fileName = fileEl.find('.tgme_widget_message_document_title').text().trim();
+
+        posts.push({ post_id: postId, date, text, url: `https://t.me/${channel}/${postId}`, has_file: hasFile, file_name: fileName });
       });
 
-      // Take the last N posts (most recent at bottom in Telegram's HTML)
+      // Take the last N (most recent — Telegram renders oldest-first in HTML)
       fetched = posts.length;
       const toProcess = posts.slice(-postLimit);
+      console.log(`[tg-batch] ${channel}: fetched ${fetched} posts, processing ${toProcess.length}`);
 
       for (const post of toProcess) {
+        const title = post.has_file
+          ? `[${channel}] #${post.post_id} 📎 ${post.file_name || 'file'}`
+          : `[${channel}] #${post.post_id}`;
         try {
-          const result = await rawTextPipeline(post.text, 'telegram', post.url, `[${channel}] #${post.post_id}`);
+          const result = await rawTextPipeline(post.text, 'telegram', post.url, title);
           if ('duplicate' in result) {
             chSkipped++;
           } else {
             chProcessed++;
-            totalCostUsd += 0.0002;
+            chCostUsd += 0.0002;
           }
         } catch (e) {
           chFailed++;
@@ -1625,12 +1638,13 @@ app.post('/api/ingest/telegram/batch', processLimiter, async (req: Request, res:
         }
       }
 
-      channelResults.push({ channel, fetched, processed: chProcessed, skipped: chSkipped, failed: chFailed });
-      console.log(`[tg-batch] ${channel}: fetched=${fetched} processed=${chProcessed} skipped=${chSkipped} failed=${chFailed}`);
+      totalCostUsd += chCostUsd;
+      channelResults.push({ channel, fetched, processed: chProcessed, skipped: chSkipped, failed: chFailed, cost: chCostUsd.toFixed(4) });
+      console.log(`[tg-batch] ${channel}: processed=${chProcessed} skipped=${chSkipped} failed=${chFailed} cost=$${chCostUsd.toFixed(4)}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[tg-batch] channel "${channel}" fetch failed:`, msg);
-      channelResults.push({ channel, fetched, processed: chProcessed, skipped: chSkipped, failed: chFailed, error: msg.slice(0, 200) });
+      console.error(`[tg-batch] "${channel}" failed:`, msg);
+      channelResults.push({ channel, fetched, processed: chProcessed, skipped: chSkipped, failed: chFailed, cost: chCostUsd.toFixed(4), error: msg.slice(0, 200) });
     }
   }
 
