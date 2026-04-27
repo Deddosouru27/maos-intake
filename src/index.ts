@@ -2711,7 +2711,18 @@ app.get('/check-feeds', async (_req: Request, res: Response) => {
         const fresh = newEntries.filter(e => !existingUrls.has(e.link));
 
         if (fresh.length > 0) {
-          const discoveryRows = fresh.map(e => ({
+          // Cap initial fetch at 30 entries to prevent capacity overload
+          const RSS_INITIAL_LIMIT = 30;
+          const isInitialFetch = !feed.last_entry_date;
+          const toInsert = isInitialFetch ? fresh.slice(0, RSS_INITIAL_LIMIT) : fresh;
+          if (isInitialFetch && fresh.length > RSS_INITIAL_LIMIT) {
+            console.log(`[rss] initial fetch capped: ${toInsert.length}/${fresh.length} entries for "${feedTitle}"`);
+          }
+          // Estimated cost: ~$0.0002 per Haiku call (avg article ~250 input tokens)
+          const estimatedCost = (toInsert.length * 0.0002).toFixed(4);
+          console.log(`[rss] batch cost estimate: ${toInsert.length} Haiku calls ≈ $${estimatedCost} for "${feedTitle}"`);
+
+          const discoveryRows = toInsert.map(e => ({
             url: e.link,
             title: e.title.slice(0, 500),
             source: `rss:${feedTitle.slice(0, 50)}`,
@@ -2722,14 +2733,15 @@ app.get('/check-feeds', async (_req: Request, res: Response) => {
         }
 
         const maxDate = newEntries.reduce((max, e) => e.pubDate > max ? e.pubDate : max, lastEntryDate);
+        const insertedCount = fresh.length > 0 ? Math.min(fresh.length, !feed.last_entry_date ? 30 : Infinity) : 0;
         await sb.from('rss_feeds').update({
           last_checked: new Date().toISOString(),
           last_entry_date: maxDate.toISOString(),
-          total_entries_found: ((feed.total_entries_found as number) ?? 0) + fresh.length,
+          total_entries_found: ((feed.total_entries_found as number) ?? 0) + insertedCount,
         }).eq('id', feed.id);
 
-        newEntriesTotal += fresh.length;
-        details.push({ feed: feedTitle, new_entries: fresh.length });
+        newEntriesTotal += insertedCount;
+        details.push({ feed: feedTitle, new_entries: insertedCount });
       } else {
         await sb.from('rss_feeds').update({ last_checked: new Date().toISOString() }).eq('id', feed.id);
         details.push({ feed: feedTitle, new_entries: 0 });
