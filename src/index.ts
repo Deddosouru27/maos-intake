@@ -1309,39 +1309,18 @@ app.post('/ingest-result', async (req: Request, res: Response) => {
     type: (['tool', 'project', 'concept', 'person'].includes(e.type ?? '') ? e.type! : 'concept') as import('./types').EntityType,
   }));
 
-  // Build knowledge items from extraction
   const insights = extraction.key_insights ?? [];
   const summary = extraction.summary ?? insights.join('. ');
-  const items: RoutedKnowledgeItem[] = [];
 
-  // Main summary item
-  if (summary.length > 10) {
-    items.push({
-      content: summary.slice(0, 2000),
-      knowledge_type: 'insight',
-      project: null,
-      domains: [],
-      solves_need: null,
-      immediate_relevance: score,
-      strategic_relevance: score * 0.9,
-      novelty: 0.5,
-      effort: 'medium',
-      has_ready_code: false,
-      business_value: null,
-      tags,
-      entity_objects: entityObjects,
-      routed_to: score >= 0.7 ? 'hot_backlog' : score >= 0.5 ? 'knowledge_base' : 'discarded',
-    });
-  }
-
-  // Individual insights as separate items
-  for (const insight of insights.slice(0, 8)) {
+  // Build KnowledgeItems for the unified pipeline
+  const items: KnowledgeItem[] = [];
+  for (const insight of insights.slice(0, 10)) {
     if (insight.length < 10) continue;
     items.push({
       content: insight.slice(0, 2000),
       knowledge_type: 'insight',
       project: null,
-      domains: [],
+      domains: tags,
       solves_need: null,
       immediate_relevance: score,
       strategic_relevance: score * 0.9,
@@ -1351,68 +1330,44 @@ app.post('/ingest-result', async (req: Request, res: Response) => {
       business_value: null,
       tags,
       entity_objects: entityObjects,
-      routed_to: score >= 0.7 ? 'hot_backlog' : score >= 0.5 ? 'knowledge_base' : 'discarded',
+    });
+  }
+  // If no insights, fall back to summary
+  if (items.length === 0 && summary.length > 10) {
+    items.push({
+      content: summary.slice(0, 2000),
+      knowledge_type: 'insight',
+      project: null,
+      domains: tags,
+      solves_need: null,
+      immediate_relevance: score,
+      strategic_relevance: score * 0.9,
+      novelty: 0.5,
+      effort: 'medium',
+      has_ready_code: false,
+      business_value: null,
+      tags,
+      entity_objects: entityObjects,
     });
   }
 
-  // 1. Save to extracted_knowledge (dedup + embedding + CRUD)
-  let knowledgeSaved: { id: string; content: string }[] = [];
-  try {
-    const result = await saveExtractedKnowledge(items, null, source_url, srcType);
-    knowledgeSaved = result.saved;
-    console.log(`[ingest-result] knowledge: ${result.saved.length} saved, ${result.dedupSkipped} dedup`);
-  } catch (e) {
-    console.error('[ingest-result] saveExtractedKnowledge failed:', e instanceof Error ? e.message : String(e));
-  }
+  const analysis: BrainAnalysis = {
+    summary,
+    knowledge_items: items,
+    overall_immediate: score,
+    overall_strategic: score * 0.9,
+    priority_signal: score >= 0.8,
+    priority_reason: '',
+    category: srcType,
+    language: 'ru',
+    entities: (extraction.entities ?? []).map(e => e.name),
+  };
 
-  // 2. Entity graph
-  let entitiesCount = 0;
-  try {
-    if (entityObjects.length > 0) {
-      await upsertEntityGraph(entityObjects);
-      entitiesCount = entityObjects.length;
-    }
-  } catch (e) {
-    console.error('[ingest-result] entity graph failed:', e instanceof Error ? e.message : String(e));
-  }
+  // Route through unified postExtractionHook (runPipeline handles knowledge, ideas, entities, WAA, source_quality)
+  const contentHash = createHash('md5').update(source_url).digest('hex');
+  const pipelineResult = await runPipeline(null, analysis, source_url, srcType, contentHash);
 
-  // 3. Auto-generate ideas from high-score knowledge
-  let ideasCount = 0;
-  try {
-    ideasCount = await generateAutoIdeas(knowledgeSaved, items, source_url, srcType);
-  } catch (e) {
-    console.error('[ingest-result] auto-ideas failed:', e instanceof Error ? e.message : String(e));
-  }
-
-  // 3b. Explicit actionable_ideas from extraction (if any, with score >= 0.7)
-  if (score >= 0.7 && extraction.actionable_ideas && extraction.actionable_ideas.length > 0) {
-    try {
-      const { createClient: mkSb } = await import('@supabase/supabase-js');
-      const sb = mkSb(pitstopUrl, pitstopKey);
-      const ideaRows = extraction.actionable_ideas.slice(0, 5).map(idea => ({
-        content: idea.slice(0, 500),
-        summary: idea.slice(0, 80),
-        source: 'auto',
-        source_url,
-        source_type: srcType,
-        status: 'new',
-        relevance: 'hot',
-        knowledge_id: knowledgeSaved[0]?.id ?? null,
-      }));
-      const { error: ideaErr } = await sb.from('ideas').insert(ideaRows);
-      if (ideaErr) console.error('[ingest-result] ideas insert failed:', ideaErr.message);
-      else ideasCount += ideaRows.length;
-    } catch (e) {
-      console.error('[ingest-result] explicit ideas failed:', e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  // 4. Source quality
-  upsertSourceQuality(source_url, score, score * 0.9, entitiesCount, true).catch(e => {
-    console.warn('[ingest-result] source quality failed:', e instanceof Error ? e.message : String(e));
-  });
-
-  // 5. Mark content_discovery as done (if queued by T490)
+  // Mark content_discovery as done (T490 — specific to ingest-result path)
   try {
     const { createClient: mkSb } = await import('@supabase/supabase-js');
     const sb = mkSb(pitstopUrl, pitstopKey);
@@ -1422,13 +1377,12 @@ app.post('/ingest-result', async (req: Request, res: Response) => {
       .in('status', ['pending_youtube', 'pending']);
   } catch { /* non-fatal */ }
 
-  console.log(`[ingest-result] ${source_url}: ${knowledgeSaved.length} knowledge, ${entitiesCount} entities, ${ideasCount} ideas`);
+  console.log(`[ingest-result] ${source_url}: pipeline done — ${pipelineResult.savedItems} knowledge, ${pipelineResult.dedupSkipped} dedup`);
   res.json({
     status: 'ingested',
-    knowledge_count: knowledgeSaved.length,
-    knowledge_ids: knowledgeSaved.map(k => k.id),
-    entities_count: entitiesCount,
-    ideas_count: ideasCount,
+    knowledge_count: pipelineResult.savedItems,
+    items_to_save: pipelineResult.itemsToSave,
+    dedup_skipped: pipelineResult.dedupSkipped,
   });
 });
 

@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { createHash } from 'crypto';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, EntityObject, EntityRelationship, EntityRelationshipType } from '../types';
@@ -595,21 +596,8 @@ export async function upsertEntityGraph(
   console.log(`[entity_graph] upserted ${toInsert.length} new nodes, updated ${toUpdate.length}, ${edgeRows.length} edges`);
 }
 
-// T516: Auto-generate actionable ideas from high-score knowledge items
-// Runs after saveExtractedKnowledge — creates ideas with source='auto' and knowledge_id linkage
-function generateIdeaText(content: string): string {
-  // Strip leading [GUIDE] prefix if present
-  const clean = content.replace(/^\[GUIDE\]\s*/, '').trim();
-  // Extract first sentence as key insight
-  const firstSentence = clean.split(/[.!?]\s/)[0] ?? clean;
-  const truncated = firstSentence.length > 200 ? firstSentence.slice(0, 200) + '…' : firstSentence;
-  // Ensure actionable verb prefix (per CLAUDE.md: Добавить/Настроить/Мигрировать/Внедрить)
-  const verbPrefixes = ['добавить', 'настроить', 'мигрировать', 'внедрить', 'implement', 'add', 'configure', 'integrate'];
-  const startsWithVerb = verbPrefixes.some(v => truncated.toLowerCase().startsWith(v));
-  if (startsWithVerb) return truncated;
-  return `Внедрить: ${truncated}`;
-}
-
+// T516: Auto-generate actionable ideas from high-score knowledge items using Haiku
+// Runs after saveExtractedKnowledge — creates ideas with source='auto_haiku' and knowledge_id linkage
 export async function generateAutoIdeas(
   savedKnowledge: { id: string; content: string }[],
   allItems: { content: string; immediate_relevance: number; knowledge_type: string; tags: string[]; entity_objects?: { name: string; type: string }[] }[],
@@ -617,6 +605,15 @@ export async function generateAutoIdeas(
   sourceType: string,
 ): Promise<number> {
   if (savedKnowledge.length === 0) return 0;
+
+  // Filter high-score items only (max 5 to stay within max_tokens=256)
+  const itemMap = new Map(allItems.map(i => [i.content, i]));
+  const candidates = savedKnowledge.filter(s => {
+    const item = itemMap.get(s.content);
+    return item && item.immediate_relevance >= 0.7;
+  }).slice(0, 5);
+
+  if (candidates.length === 0) return 0;
 
   let supabase;
   try {
@@ -626,21 +623,62 @@ export async function generateAutoIdeas(
     return 0;
   }
 
-  // Build content→item map for score lookup
-  const itemMap = new Map(allItems.map(i => [i.content, i]));
+  // Use Haiku to generate action-oriented ideas
+  const itemsText = candidates.map((s, i) => {
+    const item = itemMap.get(s.content)!;
+    const clean = s.content.replace(/^\[GUIDE\]\s*/, '').slice(0, 300);
+    return `${i + 1}. [score:${item.immediate_relevance.toFixed(2)}] ${clean}`;
+  }).join('\n');
+
+  const prompt = `Ты генерируешь actionable идеи для разработчика. Стек: Node.js, TypeScript, Supabase, Claude/Haiku, Vercel, Telegram Bot API, pgvector.
+
+Для каждого knowledge item сгенерируй ОДНУ идею — конкретное действие.
+ПРАВИЛА:
+- Начинай с глагола: Внедрить/Добавить/Настроить/Попробовать/Мигрировать/Исследовать
+- Называй конкретный инструмент и цель: "Внедрить pgvector HNSW index в extracted_knowledge"
+- Все идеи на русском языке
+- Если item — факт без actionable применения → верни null для этого item
+- Вики-тест: если к идее можно добавить "— Википедия" → это не идея, верни null
+
+Items:
+${itemsText}
+
+Верни ТОЛЬКО JSON массив строк (или null), одно значение на item:
+["идея 1", "идея 2", null]`;
+
+  let ideas: (string | null)[] = [];
+  try {
+    const haikuClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 1 });
+    const msg = await haikuClient.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 256,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const raw = (msg.content[0] as { type: string; text?: string }).text ?? '';
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    const start = cleaned.indexOf('[');
+    const end = cleaned.lastIndexOf(']');
+    if (start !== -1 && end > start) {
+      ideas = JSON.parse(cleaned.slice(start, end + 1)) as (string | null)[];
+    }
+  } catch (e) {
+    console.error('[auto-ideas] Haiku call failed:', e instanceof Error ? e.message : String(e));
+    return 0;
+  }
 
   const rows: Record<string, unknown>[] = [];
-  for (const saved of savedKnowledge) {
-    const item = itemMap.get(saved.content);
-    if (!item || item.immediate_relevance < 0.7) continue;
-
+  for (let i = 0; i < candidates.length; i++) {
+    const ideaText = ideas[i];
+    if (!ideaText || typeof ideaText !== 'string' || ideaText.trim().length < 5) continue;
+    const saved = candidates[i];
+    const item = itemMap.get(saved.content)!;
     rows.push({
-      content: generateIdeaText(saved.content),
-      summary: saved.content.slice(0, 80),
+      content: ideaText.trim().slice(0, 500),
+      summary: ideaText.trim().slice(0, 80),
       ai_category: item.knowledge_type,
       source_type: sourceType,
       source_url: sourceUrl,
-      source: 'auto',
+      source: 'auto_haiku',
       relevance: 'hot',
       status: 'new',
       knowledge_id: saved.id,
@@ -656,7 +694,7 @@ export async function generateAutoIdeas(
     return 0;
   }
 
-  console.log(`[auto-ideas] generated ${rows.length} ideas from high-score knowledge`);
+  console.log(`[auto-ideas] Haiku generated ${rows.length} ideas from ${candidates.length} high-score knowledge items`);
   return rows.length;
 }
 
