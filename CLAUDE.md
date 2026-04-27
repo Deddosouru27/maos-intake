@@ -83,6 +83,7 @@ updateIngestedDone() → ingested_content (status='done')
 7. **detectSource()**: проверяй URL pattern ПЕРВЫМ — это авторитет. Provided source_type — только fallback.
 8. **Deploy**: `npx vercel --prod --force --yes`
 9. **Git**: local=master, remote=main → `git push origin master:main`
+10. **КОПАЙ ДО КОРНЯ** — каждая проблема решается через устранение корневой причины. Цепочка: СИМПТОМ → ПРЯМАЯ ПРИЧИНА → ПРИЧИНА ПРИЧИНЫ → ROOT CAUSE. Фикс направляется на root cause. Каждый фикс обязан содержать root_cause в context. Запрещено молча исправить данные без объяснения почему они оказались неправильными.
 
 ## 🔍 Recall Instructions (читать ПЕРЕД работой)
 
