@@ -688,6 +688,20 @@ ${itemsText}
 
   if (rows.length === 0) return 0;
 
+  // Idempotency: skip knowledge_ids that already have ideas (prevents retry-loop duplicates)
+  const knowledgeIds = rows.map(r => r.knowledge_id as string).filter(Boolean);
+  if (knowledgeIds.length > 0) {
+    const { data: existingIdeas } = await supabase.from('ideas').select('knowledge_id').in('knowledge_id', knowledgeIds);
+    const existingIds = new Set((existingIdeas ?? []).map((i: { knowledge_id: string }) => i.knowledge_id));
+    const deduped = rows.filter(r => !existingIds.has(r.knowledge_id as string));
+    if (deduped.length < rows.length) {
+      console.log(`[auto-ideas] idempotency: skipped ${rows.length - deduped.length} already-existing idea(s)`);
+    }
+    if (deduped.length === 0) return 0;
+    rows.length = 0;
+    rows.push(...deduped);
+  }
+
   const { error } = await supabase.from('ideas').insert(rows);
   if (error) {
     console.error('[auto-ideas] INSERT failed:', error.message);

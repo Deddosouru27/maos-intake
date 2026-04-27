@@ -1300,6 +1300,22 @@ app.post('/ingest-result', async (req: Request, res: Response) => {
     return;
   }
 
+  // Idempotency: if this source_url was already ingested (any status), return 200 immediately
+  // Prevents retry_loop from creating duplicate knowledge/ideas for the same URL
+  try {
+    const { createClient: mkSb } = await import('@supabase/supabase-js');
+    const sb = mkSb(pitstopUrl, pitstopKey);
+    const { data: existing } = await sb.from('ingested_content').select('id, processing_status').eq('source_url', source_url).limit(1);
+    if (existing && existing.length > 0) {
+      const row = existing[0] as { id: string; processing_status: string };
+      console.log(`[ingest-result] idempotency hit — ${source_url} already ${row.processing_status} (${row.id})`);
+      res.json({ status: 'idempotent', existing_id: row.id, existing_status: row.processing_status });
+      return;
+    }
+  } catch (e) {
+    console.warn('[ingest-result] idempotency check failed (continuing):', e instanceof Error ? e.message : String(e));
+  }
+
   const score = typeof extraction.relevance_score === 'number'
     ? Math.max(0, Math.min(1, extraction.relevance_score)) : 0.5;
   const srcType = source_type ?? 'external';
