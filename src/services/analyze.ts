@@ -4,6 +4,7 @@ import { createHash } from 'crypto';
 import { BrainAnalysis, KnowledgeItem, KnowledgeType, EffortLevel, EntityObject, EntityRelationship, EntityRelationshipType } from '../types';
 import { getFullContext, buildContextString } from './projectContext';
 import { logLlmCost } from './pitstop';
+import { logFailedAndContinue } from '../lib/logFailedAndContinue';
 
 // In-process dedup: prevents re-analyzing the same text chunk within one Lambda invocation
 const analyzedHashes = new Set<string>();
@@ -34,7 +35,9 @@ async function logQuarantine(source: string, reason: string): Promise<void> {
       event_type: 'llm_quarantine',
       details: { source, reason, consecutive: consecutiveEmptyResponses, ts },
     });
-  } catch { /* non-blocking */ }
+  } catch (e) {
+    console.error('[logQuarantine] write failed:', e instanceof Error ? e.message : String(e));
+  }
 }
 
 const SYSTEM_PROMPT = `CONTEXT: You extract knowledge for MAOS — a personal AI business brain and multi-agent autonomous development system.
@@ -289,7 +292,9 @@ export async function analyzeWithChunking(text: string, source: string): Promise
         console.log(`[ANALYZE] DB dedup hit — hash=${fullHash.slice(0, 8)} already done, skipping LLM`);
         return { summary: '', knowledge_items: [], overall_immediate: 0, overall_strategic: 0, priority_signal: false, priority_reason: 'dedup_skip', category: 'skipped', language: 'other' };
       }
-    } catch { /* proceed if DB check fails */ }
+    } catch (e) {
+      logFailedAndContinue('analyze_dedup_check', e as Error);
+    }
   }
 
   if (text.length <= CHUNKING_THRESHOLD) {

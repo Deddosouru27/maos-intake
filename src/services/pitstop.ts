@@ -890,5 +890,7 @@ export async function logLlmCost(params: {
         source: params.source,
       },
     });
-  } catch { /* non-blocking */ }
+  } catch (e) {
+    console.error('[logLlmCost] write failed:', e instanceof Error ? e.message : String(e));
+  }
 }
