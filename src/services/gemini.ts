@@ -53,18 +53,24 @@ ENTITY CONTAMINATION RULE:
 - A LangGraph tutorial must NOT have entity "MAOS Runner".
 - A Python ML video must NOT have entity "Supabase".
 
-SCORING — be HARSH and HONEST. Score EACH item INDIVIDUALLY:
-- 0.9-1.0: ONLY if step-by-step implementation for our EXACT stack
-  (Node.js, TypeScript, Supabase, Telegram bots, Claude Code, Vercel)
-- 0.7-0.89: Relevant to AI/automation but needs adaptation.
-  Example: Python LangGraph tutorial = 0.7 (concept useful, language different)
-- 0.5-0.69: Interesting concept but not directly applicable
-- 0.3-0.49: Tangentially related
-- 0.0-0.29: Not relevant — OMIT items below 0.3, do not include them at all
-Score EACH insight by its specific content, not the video overall:
-  'LangGraph checkpoints for state persistence' = 0.7
-  'Python-specific LangGraph setup' = 0.3 (omit — we use TypeScript)
-  'Supervisor pattern for multi-agent' = 0.9
+SCORING — be HARSH. Score EACH item by its specific content, NOT the video overall.
+
+0.95-1.0: REVOLUTIONARY — changes how we build, extremely rare. At most 1 item per video can ever score here. If you gave multiple 0.9+ scores, you are wrong — reassess all of them.
+0.8-0.94: Step-by-step for our EXACT stack (Node.js, TypeScript, Supabase, Telegram bots, Claude, Vercel). Usable this week without significant adaptation.
+0.7-0.79: Relevant to AI/automation but needs adaptation. Useful concept, different language or platform.
+0.5-0.69: Interesting concept, not directly applicable. Generic architecture, non-stack technique.
+0.3-0.49: Tangentially related. Background knowledge. Vaguely relevant tool.
+0.0-0.29: Not relevant — OMIT items below 0.3, do not include them at all.
+
+DISTRIBUTION RULE: In a typical 20-30 min video expect: 0-1 items at 0.9+, 1-3 items at 0.7-0.89, several items at 0.5-0.69, rest below 0.5. If your output is dominated by 0.9+ scores you are miscalibrated.
+
+FEW-SHOT SCORING EXAMPLES:
+- "pgvector HNSW index cuts query time 10x vs IVFFlat for vectors under 1M" → 0.85 (Supabase+pgvector = our exact stack, directly usable)
+- "LangGraph supervisor pattern coordinates multiple agents with shared state" → 0.72 (useful concept, Python-specific details irrelevant to us)
+- "Python pip install + virtualenv setup for LangGraph" → 0.22 (omit — we use TypeScript, setup steps useless)
+- "Monolith vs microservices trade-offs for early-stage startups" → 0.38 (generic architecture, not our immediate concern)
+- "Playwright MCP integration for Claude Code enables browser automation" → 0.91 (directly applicable to Claude Code we use daily)
+- "Vercel Edge Middleware intercepts requests before function invocation" → 0.87 (Vercel = our deploy platform, usable this week)
 
 - BAD insight: "Видео рассматривает подходы к автоматизации"
 - GOOD insight: "pgvector HNSW index 10x faster than IVFFlat for vectors under 1M"
@@ -237,6 +243,30 @@ export async function analyzeYouTubeWithGemini(url: string): Promise<BrainAnalys
   }
 
   const analysis = buildBrainAnalysis(parsed);
+
+  // Entity contamination guard: validate against full_transcript + blacklist
+  const transcriptLower = (parsed.full_transcript ?? '').toLowerCase();
+  const MAOS_BLACKLIST = new Set([
+    'maos', 'pitstop', 'runner', 'intake', 'autorun', 'intaker',
+    'brainstormer', 'maos-runner', 'maos-intake', 'maos-brain', 'nout', 'pekar', 'lama',
+  ]);
+  let totalEntityDrops = 0;
+  for (const item of analysis.knowledge_items) {
+    if (!item.entity_objects?.length) continue;
+    const before = item.entity_objects.length;
+    item.entity_objects = item.entity_objects.filter((e) => {
+      const nameLower = e.name.toLowerCase();
+      if (MAOS_BLACKLIST.has(nameLower)) return false;
+      // Only validate against transcript if we have one (>50 chars)
+      if (transcriptLower.length > 50) return transcriptLower.includes(nameLower);
+      return true;
+    });
+    totalEntityDrops += before - item.entity_objects.length;
+  }
+  if (totalEntityDrops > 0) {
+    console.log(`[GEMINI] Dropped ${totalEntityDrops} phantom entities not in transcript`);
+  }
+
   console.log(`[GEMINI] Extracted ${analysis.knowledge_items.length} items, score: ${analysis.overall_immediate.toFixed(2)}, relevant: ${parsed.relevant}`);
   return analysis;
 }

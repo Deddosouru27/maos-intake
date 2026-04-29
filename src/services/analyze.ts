@@ -543,6 +543,27 @@ Extract MAX ${maxItems} most important insights as JSON. CONCISE, no ads, only a
 
   const analysis = expandCompactResponse(compactTyped);
 
+  // Entity contamination guard: drop entities not substring-found in article text
+  const textLower = trimmedText.toLowerCase();
+  const MAOS_BLACKLIST = new Set([
+    'maos', 'pitstop', 'runner', 'intake', 'autorun', 'intaker',
+    'brainstormer', 'maos-runner', 'maos-intake', 'maos-brain', 'nout', 'pekar', 'lama',
+  ]);
+  let totalEntityDrops = 0;
+  for (const item of analysis.knowledge_items) {
+    if (!item.entity_objects?.length) continue;
+    const before = item.entity_objects.length;
+    item.entity_objects = item.entity_objects.filter((e) => {
+      const nameLower = e.name.toLowerCase();
+      if (MAOS_BLACKLIST.has(nameLower)) return false;
+      return textLower.includes(nameLower);
+    });
+    totalEntityDrops += before - item.entity_objects.length;
+  }
+  if (totalEntityDrops > 0) {
+    console.log(`[ENTITY_VALIDATION] Dropped ${totalEntityDrops} phantom entities not found in article text`);
+  }
+
   if (analysis.priority_signal && !isChunk) {
     await sendTelegramAlert(source, analysis);
   }

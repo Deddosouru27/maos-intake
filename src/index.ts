@@ -8,6 +8,7 @@ import { fetchYouTubeText, extractVideoId } from './handlers/youtube';
 import { analyzeContent, analyzeWithChunking } from './services/analyze';
 import { checkSourceUrlDedup, checkContentHashDedup, insertIngestedPending, updateIngestedDone, quarantineIngestedItem, saveExtractedKnowledge, generateAutoIdeas, saveToPitstop, upsertEntityGraph, upsertSourceQuality } from './services/pitstop';
 import { rerankItems } from './services/rerank';
+import { dedupItems } from './lib/internalDedup';
 import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
 import { getFullContext } from './services/projectContext';
@@ -462,7 +463,13 @@ async function runPipeline(
   // Rerank if > 5 items (requires COHERE_API_KEY)
   const rankedItems = await rerankItems(analysis.summary, analysis.knowledge_items);
 
-  const routed = routeItems(rankedItems);
+  // Intra-article semantic dedup: remove near-duplicate items before routing
+  const { items: dedupedItems, removed: dedupRemovedCount } = dedupItems(rankedItems);
+  if (dedupRemovedCount > 0) {
+    console.log(`[DEDUP] Removed ${dedupRemovedCount} intra-article duplicate items (Jaccard≥0.7)`);
+  }
+
+  const routed = routeItems(dedupedItems);
   const hotItems = routed.filter((i) => i.routed_to === 'hot_backlog');
   const strategicItems = routed.filter((i) => i.routed_to === 'knowledge_base');
   // Strategic ideas: knowledge_base items with immediate_relevance 0.5–0.69 → appear in ideas as 'strategic'

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Unit tests for 5 critical pipeline functions.
  * Pure functions replicated from source — no external deps.
  */
@@ -427,5 +427,158 @@ describe('buildNotification', () => {
     // hot > 0, so hot message takes priority even though strategic count is higher
     expect(buildNotification(routed)).toContain('🔥');
     expect(buildNotification(routed)).not.toContain('📚');
+  });
+});
+
+// ── 6. dedupItems — intra-article Jaccard dedup (Task A) ──────────────────────
+
+function jaccardSimilarity(a: string, b: string): number {
+  const wordsA = new Set(a.toLowerCase().split(/\s+/).filter(Boolean));
+  const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(Boolean));
+  if (wordsA.size === 0 && wordsB.size === 0) return 1;
+  const intersection = [...wordsA].filter((w) => wordsB.has(w)).length;
+  const union = new Set([...wordsA, ...wordsB]).size;
+  return union > 0 ? intersection / union : 0;
+}
+
+function dedupItemsLocal(
+  items: KnowledgeItem[],
+  threshold = 0.7,
+): { items: KnowledgeItem[]; removed: number } {
+  const kept: KnowledgeItem[] = [];
+  let removed = 0;
+  for (const candidate of items) {
+    const similarIdx = kept.findIndex(
+      (k) => jaccardSimilarity(k.content, candidate.content) >= threshold,
+    );
+    if (similarIdx === -1) {
+      kept.push(candidate);
+    } else {
+      const existing = kept[similarIdx];
+      const keepCandidate =
+        candidate.immediate_relevance > existing.immediate_relevance ||
+        (candidate.immediate_relevance === existing.immediate_relevance &&
+          candidate.content.length > existing.content.length);
+      if (keepCandidate) kept[similarIdx] = candidate;
+      removed++;
+    }
+  }
+  return { items: kept, removed };
+}
+
+function makeItem(content: string, immediate_relevance = 0.5): KnowledgeItem {
+  return {
+    knowledge_type: 'insight', content, business_value: null,
+    strategic_relevance: 0.5, immediate_relevance, project: null,
+    domains: [], solves_need: null, novelty: 0.5, effort: 'medium',
+    has_ready_code: false, tags: [], entity_objects: [], entity_relationships: [],
+  };
+}
+
+describe('dedupItems', () => {
+  it('keeps two clearly different items', () => {
+    const items = [
+      makeItem('pgvector HNSW index is faster than IVFFlat for vector search'),
+      makeItem('Telegram bot can send notifications via webhooks on Vercel serverless'),
+    ];
+    const { items: out, removed } = dedupItemsLocal(items);
+    expect(out).toHaveLength(2);
+    expect(removed).toBe(0);
+  });
+
+  it('deduplicates near-identical items keeping higher relevance', () => {
+    const low  = makeItem('DevOps kurs na prakticheskikh zadaniyakh dlya razrabotchikov nachinayushchikh', 0.5);
+    const high = makeItem('DevOps kurs na prakticheskikh zadaniyakh dlya razrabotchikov s primerami', 0.8);
+    const { items: out, removed } = dedupItemsLocal([low, high]);
+    expect(out).toHaveLength(1);
+    expect(removed).toBe(1);
+    expect(out[0].immediate_relevance).toBe(0.8);
+  });
+
+  it('keeps longer content on equal relevance tie', () => {
+    const short = makeItem('Supabase pgvector HNSW index semantic search queries fast response', 0.6);
+    const long  = makeItem('Supabase pgvector HNSW index semantic search queries fast response optimized', 0.6);
+    const { items: out } = dedupItemsLocal([short, long]);
+    expect(out).toHaveLength(1);
+    expect(out[0].content).toContain('optimized');
+  });
+
+  it('handles empty input', () => {
+    const { items: out, removed } = dedupItemsLocal([]);
+    expect(out).toHaveLength(0);
+    expect(removed).toBe(0);
+  });
+
+  it('respects custom threshold', () => {
+    const a = makeItem('Supabase pgvector HNSW index semantic search fast efficient production');
+    const b = makeItem('Supabase pgvector HNSW index semantic search fast efficient build');
+    const strict = dedupItemsLocal([a, b], 0.7);
+    expect(strict.removed).toBe(1);
+    const loose = dedupItemsLocal([a, b], 0.99);
+    expect(loose.removed).toBe(0);
+  });
+});
+
+// ── 7. entityValidation — phantom entity filter (Task C) ─────────────────────
+
+function filterPhantomEntities(
+  entityObjects: { name: string; type: string }[],
+  articleText: string,
+): { name: string; type: string }[] {
+  const MAOS_BLACKLIST = new Set([
+    'maos', 'pitstop', 'runner', 'intake', 'autorun', 'intaker',
+    'brainstormer', 'maos-runner', 'maos-intake', 'maos-brain', 'nout', 'pekar', 'lama',
+  ]);
+  const textLower = articleText.toLowerCase();
+  return entityObjects.filter((e) => {
+    const nameLower = e.name.toLowerCase();
+    if (MAOS_BLACKLIST.has(nameLower)) return false;
+    return textLower.includes(nameLower);
+  });
+}
+
+describe('entityValidation', () => {
+  it('keeps entities that appear in article text', () => {
+    const text = 'Discord bot uses Python and Redis for caching messages efficiently.';
+    const entities = [
+      { name: 'Discord', type: 'tool' },
+      { name: 'Redis', type: 'tool' },
+      { name: 'Python', type: 'tool' },
+    ];
+    const result = filterPhantomEntities(entities, text);
+    expect(result).toHaveLength(3);
+  });
+
+  it('drops entities not mentioned in article text', () => {
+    const text = 'Discord bot uses Python and Redis for caching messages efficiently.';
+    const entities = [
+      { name: 'Discord', type: 'tool' },
+      { name: 'MAOS Runner', type: 'project' },
+      { name: 'Railway', type: 'tool' },
+    ];
+    const result = filterPhantomEntities(entities, text);
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe('Discord');
+  });
+
+  it('always drops MAOS blacklist terms', () => {
+    const text = 'This article mentions maos and pitstop and runner.';
+    const entities = [
+      { name: 'maos', type: 'project' },
+      { name: 'pitstop', type: 'project' },
+      { name: 'runner', type: 'project' },
+    ];
+    const result = filterPhantomEntities(entities, text);
+    expect(result).toHaveLength(0);
+  });
+
+  it('is case-insensitive for matching', () => {
+    const text = 'The article covers SUPABASE and VERCEL deployment pipelines.';
+    const entities = [
+      { name: 'Supabase', type: 'tool' },
+      { name: 'Vercel', type: 'tool' },
+    ];
+    const result = filterPhantomEntities(entities, text);
+    expect(result).toHaveLength(2);
   });
 });
