@@ -3871,6 +3871,26 @@ app.get('/api/lessons/extract', async (_req: Request, res: Response) => {
   }
 });
 
+/** POST /api/trend-detection/run — manual trigger only (no cron — spike phase).
+ *  Entity frequency spike detector: groups entity mentions into recent (3d) vs
+ *  baseline (7d), flags entities with >2x frequency increase.
+ *  Also writes research_finding snapshot (Gemini Deep Research eval, idempotent).
+ *  No external API — zero cost beyond DB reads.
+ */
+app.post('/api/trend-detection/run', async (_req: Request, res: Response) => {
+  const ts = new Date().toISOString();
+  console.log('[trend-detection] Manual trigger at:', ts);
+  try {
+    const { runTrendDetection } = await import('./trend-detection/index');
+    const result = await runTrendDetection();
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[trend-detection] Unhandled error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
 /** POST /api/quality-eval/run — manual trigger + weekly cron (Sunday 02:00 UTC).
  *  Scores each extracted_knowledge item from the last N days on 5 quality dimensions,
  *  groups by source_type, writes snapshot type=quality_baseline_<date>.
