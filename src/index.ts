@@ -3871,6 +3871,26 @@ app.get('/api/lessons/extract', async (_req: Request, res: Response) => {
   }
 });
 
+/** POST /api/entity-normalize/run — manual trigger for entity dedup backfill.
+ *  Groups entity_nodes by lower(trim(name)), picks canonical per group (highest
+ *  mention_count → oldest → lexicographic), rewires entity_edges and
+ *  extracted_knowledge.entity_objects, deletes duplicates.
+ *  Idempotent: re-running on a clean graph returns 0 deleted.
+ */
+app.post('/api/entity-normalize/run', async (_req: Request, res: Response) => {
+  const ts = new Date().toISOString();
+  console.log('[entity-normalize] Manual trigger at:', ts);
+  try {
+    const { runEntityNormalize } = await import('./entity-normalize/index');
+    const result = await runEntityNormalize();
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[entity-normalize] Unhandled error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
 /** GET /api/auto-research/run — weekly cron (Monday 01:00 UTC).
  *  A/B tests extraction prompt variants on 50 fresh knowledge items, scores quality,
  *  writes winner to context_snapshots(prompt_optimization_result) and archives loser.

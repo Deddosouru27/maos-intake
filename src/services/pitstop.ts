@@ -482,37 +482,47 @@ export async function upsertEntityGraph(
 
   const supabase = createClient(pitstopUrl, pitstopKey);
 
-  // Deduplicate by lowercase name, keep first occurrence (preserves type)
+  // Deduplicate by lowercase name, keep first occurrence (preserves type).
+  // Root-cause fix: normalize name (trim + collapse whitespace) before any DB operation
+  // so ' OpenAI ' and 'OpenAI' never create separate nodes.
   const seen = new Set<string>();
   const unique: EntityObject[] = [];
   for (const e of entityObjects) {
-    const key = e.name.trim().toLowerCase();
+    const normalized = e.name.trim().replace(/\s+/g, ' ');
+    const key = normalized.toLowerCase();
     if (key && !seen.has(key)) {
       seen.add(key);
-      unique.push(e);
+      unique.push({ ...e, name: normalized });
     }
   }
   if (unique.length === 0) return;
 
   const names = unique.map(e => e.name);
 
-  // Fetch existing nodes in one query
+  // Fetch existing nodes — use ilike per name for case-insensitive match so
+  // 'openai' resolves to an existing 'OpenAI' node instead of creating a new one.
+  // ilike treats only % and _ as wildcards; dots, dashes etc. are literal.
+  const ilikeFilter = names.map(n => `name.ilike.${n}`).join(',');
   const { data: existing } = await supabase
     .from('entity_nodes')
     .select('id, name, mention_count')
-    .in('name', names);
+    .or(ilikeFilter);
 
-  const existingByName = new Map(
-    (existing ?? []).map(n => [n.name as string, n as { id: string; mention_count: number }])
+  // Map by lowercase key so lookup is case-insensitive
+  const existingByLowerKey = new Map(
+    (existing ?? []).map(n => [
+      (n.name as string).trim().toLowerCase(),
+      n as { id: string; name: string; mention_count: number },
+    ])
   );
 
-  const toInsert = unique.filter(e => !existingByName.has(e.name));
-  const toUpdate = unique.filter(e => existingByName.has(e.name));
+  const toInsert = unique.filter(e => !existingByLowerKey.has(e.name.toLowerCase()));
+  const toUpdate = unique.filter(e => existingByLowerKey.has(e.name.toLowerCase()));
 
-  // name → id map for edge building
-  const nodeIdMap = new Map<string, string>();
+  // lowercase key → id, used for case-insensitive edge building
+  const nodeIdByLowerKey = new Map<string, string>();
 
-  // Insert new nodes
+  // Insert new nodes with normalized names
   if (toInsert.length > 0) {
     const { data: inserted, error: insertErr } = await supabase
       .from('entity_nodes')
@@ -522,38 +532,41 @@ export async function upsertEntityGraph(
       console.error('[entity_graph] insert nodes error:', insertErr.message);
     }
     for (const n of inserted ?? []) {
-      nodeIdMap.set(n.name as string, n.id as string);
+      nodeIdByLowerKey.set((n.name as string).toLowerCase(), n.id as string);
     }
   }
 
   // Increment mention_count for existing nodes
   for (const e of toUpdate) {
-    const node = existingByName.get(e.name);
+    const node = existingByLowerKey.get(e.name.toLowerCase());
     if (!node) continue;
-    nodeIdMap.set(e.name, node.id);
+    nodeIdByLowerKey.set(e.name.toLowerCase(), node.id);
     await supabase
       .from('entity_nodes')
       .update({ mention_count: (node.mention_count ?? 0) + 1, updated_at: new Date().toISOString() })
       .eq('id', node.id);
   }
 
-  if (nodeIdMap.size < 2) return;
+  if (nodeIdByLowerKey.size < 2) return;
 
-  // Build co-occurrence edges: count how many items each entity pair appears in together
-  // Fall back to treating all entities as one item if per-item data not provided
+  // Build co-occurrence edges: count how many items each entity pair appears in together.
+  // Normalize names from perItemEntities too so they resolve to the correct node IDs.
   const itemGroups: EntityObject[][] = (perItemEntities && perItemEntities.length > 0)
     ? perItemEntities
     : [unique];
 
   const coOccurrenceMap = new Map<string, number>();
   for (const itemEntities of itemGroups) {
-    const knownNames = itemEntities.map(e => e.name).filter(n => nodeIdMap.has(n));
-    for (let i = 0; i < knownNames.length - 1; i++) {
-      for (let j = i + 1; j < knownNames.length; j++) {
-        // Canonical key: lexicographically smaller name first (undirected edge)
-        const [a, b] = knownNames[i] < knownNames[j]
-          ? [knownNames[i], knownNames[j]]
-          : [knownNames[j], knownNames[i]];
+    // Normalize and filter to known nodes using lowercase key
+    const knownLowerKeys = itemEntities
+      .map(e => e.name.trim().replace(/\s+/g, ' ').toLowerCase())
+      .filter(lk => nodeIdByLowerKey.has(lk));
+    for (let i = 0; i < knownLowerKeys.length - 1; i++) {
+      for (let j = i + 1; j < knownLowerKeys.length; j++) {
+        // Canonical key: lexicographically smaller key first (undirected edge)
+        const [a, b] = knownLowerKeys[i] < knownLowerKeys[j]
+          ? [knownLowerKeys[i], knownLowerKeys[j]]
+          : [knownLowerKeys[j], knownLowerKeys[i]];
         const key = `${a}|${b}`;
         coOccurrenceMap.set(key, (coOccurrenceMap.get(key) ?? 0) + 1);
       }
@@ -564,9 +577,9 @@ export async function upsertEntityGraph(
 
   const edgeRows: { source_id: string; target_id: string; relationship: string; weight: number }[] = [];
   for (const [key, count] of coOccurrenceMap) {
-    const [aName, bName] = key.split('|');
-    const srcId = nodeIdMap.get(aName);
-    const tgtId = nodeIdMap.get(bName);
+    const [aKey, bKey] = key.split('|');
+    const srcId = nodeIdByLowerKey.get(aKey);
+    const tgtId = nodeIdByLowerKey.get(bKey);
     if (!srcId || !tgtId) continue;
     edgeRows.push({ source_id: srcId, target_id: tgtId, relationship: 'co_occurs', weight: count });
   }
