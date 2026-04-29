@@ -12,6 +12,7 @@ import { dedupItems } from './lib/internalDedup';
 import { fetchArticle, fetchWithJina } from './handlers/article';
 import { fetchInstagramTranscript } from './apify';
 import { getFullContext } from './services/projectContext';
+import { logFailedAndContinue } from './lib/logFailedAndContinue';
 import { BrainAnalysis, KnowledgeItem, RoutedKnowledgeItem, RoutedTo } from './types';
 
 async function writeContextSnapshot(
@@ -1398,7 +1399,9 @@ app.post('/ingest-result', async (req: Request, res: Response) => {
       .update({ status: 'done', processed_at: new Date().toISOString() })
       .eq('url', source_url)
       .in('status', ['pending_youtube', 'pending']);
-  } catch { /* non-fatal */ }
+  } catch (e) {
+    logFailedAndContinue('content_discovery_update', e as Error, { source_url });
+  }
 
   console.log(`[ingest-result] ${source_url}: pipeline done — ${pipelineResult.savedItems} knowledge, ${pipelineResult.dedupSkipped} dedup`);
   res.json({
@@ -2879,7 +2882,9 @@ app.post('/recommend', async (req: Request, res: Response) => {
       details: { topics, total: recommendations.length, by_topic: topicStats },
       repo: 'maos-intake',
     });
-  } catch { /* non-fatal */ }
+  } catch (e) {
+    logFailedAndContinue('agent_action_log_recommend', e as Error);
+  }
 
   console.log(`[recommend] ${recommendations.length} recommendations across ${topics.length} topics`);
   res.json({
@@ -3552,7 +3557,9 @@ app.post('/auto-triage', async (_req: Request, res: Response) => {
       details: { approved: totalApproved, rejected: totalRejected, tasks: totalTasks, errors: totalErrors },
       repo: 'maos-intake',
     });
-  } catch { /* non-fatal */ }
+  } catch (e) {
+    logFailedAndContinue('agent_action_log_auto_triage', e as Error);
+  }
 
   res.json({ success: true, approved: totalApproved, rejected: totalRejected, tasks: totalTasks, errors: totalErrors, report });
 });
@@ -3689,7 +3696,9 @@ app.post('/triage-all', async (_req: Request, res: Response) => {
       details: { total: scored.length, approved, rejected, review, top_5: scored.slice(0, 5).map(s => ({ id: s.id, priority: +s.priority.toFixed(2) })) },
       repo: 'maos-intake',
     });
-  } catch { /* non-fatal */ }
+  } catch (e) {
+    logFailedAndContinue('agent_action_log_triage_all', e as Error);
+  }
 
   console.log(`[triage-all] ${scored.length} ideas: ${approved} approved, ${rejected} rejected, ${review} review`);
 
@@ -3818,6 +3827,48 @@ app.get('/heartbeat', async (_req: Request, res: Response) => {
   }
 
   res.json(result);
+});
+
+/** GET /api/lessons/extract — weekly cron (Sunday 00:00 UTC = 03:00 MSK).
+ *  Reads gotcha/finding snapshots from past 7 days, extracts common patterns via Sonnet,
+ *  saves lessons to context_snapshots, sends Telegram summary.
+ */
+app.get('/api/lessons/extract', async (_req: Request, res: Response) => {
+  const ts = new Date().toISOString();
+  console.log('[lessons] Cron triggered at:', ts);
+
+  try {
+    const { extractWeeklyLessons } = await import('./services/lessonsExtractor');
+    const result = await extractWeeklyLessons();
+
+    if (result.status === 'extracted' && (result.lessons_count ?? 0) > 0) {
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (token && chatId) {
+        const n = result.lessons_count ?? 0;
+        const suffix = n === 1 ? '' : n < 5 ? 'а' : 'ов';
+        const bulletLines = (result.lessons ?? [])
+          .map((l) => `• ${l.rule_id}: ${l.prevention_rule}`)
+          .join('\n');
+        const text = `🧠 Извлечено ${n} урок${suffix} за неделю (из ${result.snapshots_analyzed} ошибок):\n${bulletLines}`;
+        try {
+          await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text }),
+          });
+        } catch (tgErr) {
+          console.error('[lessons] Telegram failed:', tgErr instanceof Error ? tgErr.message : String(tgErr));
+        }
+      }
+    }
+
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[lessons] Unhandled error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
 });
 
 /** POST /generate-digest — weekly knowledge digest grouped by top tags. Zero LLM cost. */

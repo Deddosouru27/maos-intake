@@ -32,7 +32,8 @@ async function fetchTwitter(url: string): Promise<ThreadResult> {
       author: data.user_name ?? username,
       platform: 'twitter',
     };
-  } catch {
+  } catch (e) {
+    console.warn('[fetchTwitter] failed:', e instanceof Error ? e.message : String(e));
     return { text: '', author: username, platform: 'twitter' };
   }
 }
@@ -64,7 +65,8 @@ async function fetchThreads(url: string): Promise<ThreadResult> {
       author: author.trim(),
       platform: 'threads',
     };
-  } catch {
+  } catch (e) {
+    console.warn('[fetchThreads] failed:', e instanceof Error ? e.message : String(e));
     return { text: '', author: '', platform: 'threads' };
   }
 }
