@@ -3871,6 +3871,40 @@ app.get('/api/lessons/extract', async (_req: Request, res: Response) => {
   }
 });
 
+/** POST /api/quality-eval/run — manual trigger + weekly cron (Sunday 02:00 UTC).
+ *  Scores each extracted_knowledge item from the last N days on 5 quality dimensions,
+ *  groups by source_type, writes snapshot type=quality_baseline_<date>.
+ *  Body: { days?: number } (default 7)
+ */
+app.post('/api/quality-eval/run', async (req: Request, res: Response) => {
+  const ts = new Date().toISOString();
+  const days = typeof req.body?.days === 'number' ? req.body.days : 7;
+  console.log('[quality-eval] Triggered at:', ts, 'days:', days);
+  try {
+    const { runQualityEval } = await import('./quality-eval/index');
+    const result = await runQualityEval({ days });
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[quality-eval] Unhandled error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
+// GET alias for Vercel cron (crons are always GET)
+app.get('/api/quality-eval/run', async (_req: Request, res: Response) => {
+  const ts = new Date().toISOString();
+  console.log('[quality-eval] Cron triggered at:', ts);
+  try {
+    const { runQualityEval } = await import('./quality-eval/index');
+    const result = await runQualityEval({ days: 7 });
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
 /** POST /api/entity-normalize/run — manual trigger for entity dedup backfill.
  *  Groups entity_nodes by lower(trim(name)), picks canonical per group (highest
  *  mention_count → oldest → lexicographic), rewires entity_edges and
