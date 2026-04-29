@@ -85,20 +85,39 @@ updateIngestedDone() → ingested_content (status='done')
 9. **Git**: local=master, remote=main → `git push origin master:main`
 10. **КОПАЙ ДО КОРНЯ** — каждая проблема решается через устранение корневой причины. Цепочка: СИМПТОМ → ПРЯМАЯ ПРИЧИНА → ПРИЧИНА ПРИЧИНЫ → ROOT CAUSE. Фикс направляется на root cause. Каждый фикс обязан содержать root_cause в context. Запрещено молча исправить данные без объяснения почему они оказались неправильными.
 
-## 🔍 Recall Instructions (читать ПЕРЕД работой)
+## 🔍 Recall-Before-Action (ОБЯЗАТЕЛЬНО — ПЕРВОЕ ДЕЙСТВИЕ)
+
+Перед любой задачей ты ОБЯЗАН выполнить ЭТИ запросы ПЕРВЫМ действием через `mcp__claude_ai_Supabase__execute_sql` (project_id: `stqhnkhcfndmhgvfyojv`):
 
 ```sql
--- Последние WAA логи
+-- 1. Strict development rules
+SELECT content FROM context_snapshots
+WHERE content->>'rule' = 'strict_development_rules_v1';
+
+-- 2. Релевантные snapshots по теме задачи (подставь ключевое слово)
+SELECT content FROM context_snapshots
+WHERE content::text ILIKE '%<keyword from task>%'
+ORDER BY created_at DESC LIMIT 5;
+
+-- 3. Последние WAA логи intake
 SELECT content FROM context_snapshots
 WHERE snapshot_type = 'intake_processing_log'
 ORDER BY created_at DESC LIMIT 5;
 
--- Калибровочные данные для triage
+-- 4. Свежие gotcha и finding (последние 7 дней)
+SELECT content FROM context_snapshots
+WHERE snapshot_type IN ('gotcha', 'finding')
+  AND created_at > now() - interval '7 days'
+ORDER BY created_at DESC LIMIT 10;
+
+-- 5. Калибровочные данные для triage
 SELECT content FROM context_snapshots
 WHERE snapshot_type = 'calibration_data'
-AND content->>'type' = 'idea_triage_calibration'
+  AND content->>'type' = 'idea_triage_calibration'
 LIMIT 5;
 ```
+
+Без этого ты повторяешь ошибки прошлого. Это не reading material — это REQUIRED FIRST STEP.
 
 ## 📝 WAA (Write-After-Action) Format
 
@@ -153,7 +172,7 @@ LIMIT 5;
 ## 🔄 Workflow
 
 1. Получить задачу
-2. Читать context_snapshots (recall) если нужно
+2. **RECALL** — выполнить все 5 SQL запросов из секции выше (ОБЯЗАТЕЛЬНО, не пропускать)
 3. Написать код
 4. `npx tsc --noEmit && npm run build`
 5. Один коммит
