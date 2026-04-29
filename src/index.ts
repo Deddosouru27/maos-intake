@@ -3871,6 +3871,24 @@ app.get('/api/lessons/extract', async (_req: Request, res: Response) => {
   }
 });
 
+/** GET /api/auto-research/run — weekly cron (Monday 01:00 UTC).
+ *  A/B tests extraction prompt variants on 50 fresh knowledge items, scores quality,
+ *  writes winner to context_snapshots(prompt_optimization_result) and archives loser.
+ */
+app.get('/api/auto-research/run', async (_req: Request, res: Response) => {
+  const ts = new Date().toISOString();
+  console.log('[auto-research] Cron triggered at:', ts);
+  try {
+    const { runAutoResearch } = await import('./auto-research/index');
+    const result = await runAutoResearch();
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[auto-research] Unhandled error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
 /** POST /generate-digest — weekly knowledge digest grouped by top tags. Zero LLM cost. */
 app.post('/generate-digest', async (req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
