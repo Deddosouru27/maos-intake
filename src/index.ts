@@ -3963,6 +3963,64 @@ app.get('/api/auto-research/run', async (_req: Request, res: Response) => {
   }
 });
 
+// ── GitHub Parsing Pipeline (Cluster 6) ──────────────────────────────────────
+
+/** GET /api/github-parsing/trending/run — daily cron 09:00 UTC. Apify trending repos. */
+app.get('/api/github-parsing/trending/run', async (_req: Request, res: Response) => {
+  const ts = new Date().toISOString();
+  try {
+    const { handleTrendingRun } = await import('./github-parsing/index');
+    const result = await handleTrendingRun();
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[github-parsing/trending] error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
+/** GET /api/github-parsing/awesome-lists/run — every 6 hours cron. Atom feed diff monitor. */
+app.get('/api/github-parsing/awesome-lists/run', async (_req: Request, res: Response) => {
+  const ts = new Date().toISOString();
+  try {
+    const { handleAwesomeListsRun } = await import('./github-parsing/index');
+    const result = await handleAwesomeListsRun();
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[github-parsing/awesome-lists] error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
+/** GET /api/github-parsing/bigquery-skills/run — daily cron 10:00 UTC. BigQuery SKILL.md discovery. */
+app.get('/api/github-parsing/bigquery-skills/run', async (_req: Request, res: Response) => {
+  const ts = new Date().toISOString();
+  try {
+    const { handleBigQuerySkillsRun } = await import('./github-parsing/index');
+    const result = await handleBigQuerySkillsRun();
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[github-parsing/bigquery-skills] error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
+/** GET /api/github-parsing/extract/run — hourly cron. Haiku extraction of pending repos/skills. */
+app.get('/api/github-parsing/extract/run', async (_req: Request, res: Response) => {
+  const ts = new Date().toISOString();
+  try {
+    const { handleExtractionRun } = await import('./github-parsing/index');
+    const result = await handleExtractionRun();
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[github-parsing/extract] error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
 /** POST /generate-digest — weekly knowledge digest grouped by top tags. Zero LLM cost. */
 app.post('/generate-digest', async (req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;
