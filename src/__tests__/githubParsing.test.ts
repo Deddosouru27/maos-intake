@@ -258,3 +258,42 @@ describe('idempotency', () => {
     expect(newShas).toHaveLength(3);
   });
 });
+
+// ── 9. CRON_SECRET auth (Railway → Vercel) ────────────────────────────────────
+
+function verifyCronSecret(
+  headerValue: string | undefined,
+  envSecret: string | undefined,
+): 'ok' | 'no_secret_configured' | 'unauthorized' {
+  if (!envSecret) return 'no_secret_configured';
+  if (headerValue !== envSecret) return 'unauthorized';
+  return 'ok';
+}
+
+describe('verifyCronSecret', () => {
+  // MUTATION: removing auth → any caller can trigger Haiku extraction (cost blowout)
+  it('MUTATION: returns unauthorized when header missing', () => {
+    expect(verifyCronSecret(undefined, 'my-secret')).toBe('unauthorized');
+  });
+
+  it('MUTATION: returns unauthorized when header does not match', () => {
+    expect(verifyCronSecret('wrong-secret', 'my-secret')).toBe('unauthorized');
+  });
+
+  it('returns ok when header matches secret', () => {
+    expect(verifyCronSecret('my-secret', 'my-secret')).toBe('ok');
+  });
+
+  it('returns no_secret_configured when env not set', () => {
+    expect(verifyCronSecret('anything', undefined)).toBe('no_secret_configured');
+  });
+
+  it('returns unauthorized for empty string header (not a match)', () => {
+    expect(verifyCronSecret('', 'my-secret')).toBe('unauthorized');
+  });
+
+  it('secret comparison is exact (case-sensitive)', () => {
+    expect(verifyCronSecret('MY-SECRET', 'my-secret')).toBe('unauthorized');
+    expect(verifyCronSecret('my-secret', 'MY-SECRET')).toBe('unauthorized');
+  });
+});
