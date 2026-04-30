@@ -1,11 +1,5 @@
 {
   "version": 2,
   "builds": [{ "src": "src/index.ts", "use": "@vercel/node", "config": { "maxDuration": 60 } }],
-  "routes": [{ "src": "/(.*)", "dest": "src/index.ts" }],
-  "crons": [
-    { "path": "/heartbeat", "schedule": "0 3 * * *" },
-    { "path": "/api/lessons/extract", "schedule": "0 0 * * 0" },
-    { "path": "/api/auto-research/run", "schedule": "0 1 * * 1" },
-    { "path": "/api/quality-eval/run", "schedule": "0 2 * * 0" }
-  ]
+  "routes": [{ "src": "/(.*)", "dest": "src/index.ts" }]
 }

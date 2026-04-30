@@ -3963,6 +3963,83 @@ app.get('/api/auto-research/run', async (_req: Request, res: Response) => {
   }
 });
 
+// ── GitHub Parsing Pipeline (Cluster 6) ──────────────────────────────────────
+// Triggered by Railway node-cron (Sprint 2), not Vercel crons.
+// Auth: X-Cron-Secret header must match process.env.CRON_SECRET.
+
+function verifyCronSecret(req: Request, res: Response): boolean {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) {
+    res.status(500).json({ error: 'CRON_SECRET not configured' });
+    return false;
+  }
+  if (req.headers['x-cron-secret'] !== secret) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return false;
+  }
+  return true;
+}
+
+/** POST /api/github-parsing/trending/run — triggered by Railway cron daily 09:00 UTC. */
+app.post('/api/github-parsing/trending/run', async (req: Request, res: Response) => {
+  if (!verifyCronSecret(req, res)) return;
+  const ts = new Date().toISOString();
+  try {
+    const { handleTrendingRun } = await import('./github-parsing/index');
+    const result = await handleTrendingRun();
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[github-parsing/trending] error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
+/** POST /api/github-parsing/awesome-lists/run — triggered by Railway cron every 6h. */
+app.post('/api/github-parsing/awesome-lists/run', async (req: Request, res: Response) => {
+  if (!verifyCronSecret(req, res)) return;
+  const ts = new Date().toISOString();
+  try {
+    const { handleAwesomeListsRun } = await import('./github-parsing/index');
+    const result = await handleAwesomeListsRun();
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[github-parsing/awesome-lists] error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
+/** POST /api/github-parsing/bigquery-skills/run — triggered by Railway cron daily 10:00 UTC. */
+app.post('/api/github-parsing/bigquery-skills/run', async (req: Request, res: Response) => {
+  if (!verifyCronSecret(req, res)) return;
+  const ts = new Date().toISOString();
+  try {
+    const { handleBigQuerySkillsRun } = await import('./github-parsing/index');
+    const result = await handleBigQuerySkillsRun();
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[github-parsing/bigquery-skills] error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
+/** POST /api/github-parsing/extract/run — triggered by Railway cron hourly. */
+app.post('/api/github-parsing/extract/run', async (req: Request, res: Response) => {
+  if (!verifyCronSecret(req, res)) return;
+  const ts = new Date().toISOString();
+  try {
+    const { handleExtractionRun } = await import('./github-parsing/index');
+    const result = await handleExtractionRun();
+    res.json({ ts, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[github-parsing/extract] error:', msg);
+    res.status(500).json({ ts, status: 'error', error: msg });
+  }
+});
+
 /** POST /generate-digest — weekly knowledge digest grouped by top tags. Zero LLM cost. */
 app.post('/generate-digest', async (req: Request, res: Response) => {
   const pitstopUrl = process.env.PITSTOP_SUPABASE_URL;

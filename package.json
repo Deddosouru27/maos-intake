@@ -26,6 +26,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
     "@distube/ytdl-core": "^4.16.12",
+    "@google-cloud/bigquery": "^8.3.0",
     "@google/genai": "^1.49.0",
     "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.100.1",
@@ -37,6 +38,7 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "express-rate-limit": "^8.3.1",
+    "fast-xml-parser": "^5.7.2",
     "form-data": "^4.0.5",
     "groq-sdk": "^1.1.2",
     "html-to-text": "^9.0.5",
